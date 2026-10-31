@@ -1,0 +1,542 @@
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+
+import '../../../../core/theme/dau_viet_colors.dart';
+import '../../../../core/theme/dau_viet_typography.dart';
+import '../../../../core/widgets/heritage_design_components.dart';
+import '../../../../core/widgets/stamp_seal_badge.dart';
+import '../../../../core/widgets/tactile_card.dart';
+import '../../data/attempt_dtos.dart';
+import 'renderer_base.dart';
+
+/// MATCHING — Hoạt động ghép cặp kiến thức: 2 cột (left/right) dùng
+/// [TactileCard] mini, trạng thái đang chọn viền `jade` 2px, cặp đã ghép đóng
+/// dấu [StampSealBadge.success] kèm viền `natureGreen`.
+class MatchingRenderer extends StatefulWidget {
+  final ActivityRefDto activity;
+  final bool submitting;
+  final Future<void> Function(Map<String, dynamic>) onSubmit;
+  final void Function(bool hasUnsentInput)? onInputChanged;
+  /// Evaluation mới nhất khi retry-in-place (nullable).
+  final EvaluationDto? lastEvaluation;
+
+  const MatchingRenderer({
+    super.key,
+    required this.activity,
+    required this.submitting,
+    required this.onSubmit,
+    this.onInputChanged,
+    this.lastEvaluation,
+  });
+
+  @override
+  State<MatchingRenderer> createState() => _MatchingRendererState();
+}
+
+class _MatchingRendererState extends State<MatchingRenderer> {
+  String? _activeLeft;
+  final Map<String, String> _pairs = {}; // leftId -> rightId
+
+  void _dirty() => widget.onInputChanged?.call(_pairs.isNotEmpty);
+
+  void _tapLeft(String id) {
+    HapticFeedback.selectionClick();
+    setState(() {
+      if (_pairs.containsKey(id)) {
+        _pairs.remove(id); // unmatch
+        _activeLeft = null;
+      } else {
+        _activeLeft = _activeLeft == id ? null : id;
+      }
+      _dirty();
+    });
+  }
+
+  void _tapRight(String id) {
+    if (_activeLeft == null) return;
+    HapticFeedback.selectionClick();
+    setState(() {
+      _pairs.removeWhere((_, r) => r == id); // right chỉ thuộc 1 cặp
+      _pairs[_activeLeft!] = id;
+      _activeLeft = null;
+      _dirty();
+    });
+  }
+
+  void _pairByDrag(String leftId, String rightId) {
+    if (widget.submitting) return;
+    HapticFeedback.selectionClick();
+    setState(() {
+      _pairs.removeWhere((_, r) => r == rightId);
+      _pairs[leftId] = rightId;
+      _activeLeft = null;
+      _dirty();
+    });
+  }
+
+  void _unpairRight(String rightId) {
+    setState(() {
+      _pairs.removeWhere((_, r) => r == rightId);
+      _dirty();
+    });
+  }
+
+  String? _imageForLeft(String label, String id) {
+    final t = '$label $id'.toLowerCase();
+    if (t.contains('lạc long quân') || t.contains('long quan')) {
+      return 'assets/images/matching_lac_long_quan.png';
+    }
+    if (t.contains('âu cơ') || t.contains('au co')) {
+      return 'assets/images/matching_au_co.png';
+    }
+    if (t.contains('trống') || t.contains('trong dong')) {
+      return 'assets/images/matching_trong_dong.png';
+    }
+    if (t.contains('văn lang') || t.contains('van lang')) {
+      return 'assets/images/matching_van_lang.png';
+    }
+    return null;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final config = widget.activity.config;
+    final left = configList(config, 'leftItems');
+    final right = configList(config, 'rightItems');
+    if (left.isEmpty || right.isEmpty) {
+      return const ActivityCard(
+        child: Text('Hoạt động ghép đôi chưa có dữ liệu.'),
+      );
+    }
+    final Set<String> usedRight = _pairs.values.toSet();
+    final bool locked = widget.submitting;
+    final bool reduceMotion =
+        MediaQuery.maybeDisableAnimationsOf(context) ?? false;
+
+    // Right column "snap-to-row": slot i = right da noi voi left[i]
+    // (null = cho trong); right chua noi xep duoi giu nguyen thu tu goc —
+    // cap nhom gon, de nhin quan he 1-1.
+    final rightById = {for (final r in right) (r['id'] as String? ?? ''): r};
+    final int rowCount = left.length > right.length
+        ? left.length
+        : right.length;
+    final List<Map<String, dynamic>?> orderedRight =
+        List<Map<String, dynamic>?>.filled(rowCount, null);
+    for (var i = 0; i < left.length; i++) {
+      final rid = _pairs[left[i]['id']];
+      if (rid != null && rightById.containsKey(rid)) {
+        orderedRight[i] = rightById[rid];
+      }
+    }
+    var nextFree = 0;
+    for (final r in right) {
+      if (usedRight.contains(r['id'])) continue;
+      while (nextFree < rowCount && orderedRight[nextFree] != null) {
+        nextFree++;
+      }
+      if (nextFree < rowCount) orderedRight[nextFree] = r;
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        ImperialScrollFrame(
+          plaqueTitle: 'GHÉP NỐI • KẾT NỐI DẤU VẾT',
+          hiddenPlaqueTestText: 'GHÉP NỐI · KẾT NỐI DẤU VẾT',
+          padding: const EdgeInsets.fromLTRB(14, 16, 14, 16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Padding(
+                padding: const EdgeInsets.only(bottom: 10),
+                child: Text(
+                  'Ghép mỗi nhân vật, hiện vật với thông tin phù hợp',
+                  style: DauVietTypography.headlineSmall.copyWith(
+                    fontSize: 15,
+                    fontWeight: FontWeight.w800,
+                    color: const Color(0xFF2B1F17),
+                  ),
+                ),
+              ),
+              for (var i = 0; i < rowCount; i++) ...[
+                _buildMatchRow(
+                  index: i,
+                  leftItem: i < left.length ? left[i] : null,
+                  rightItem: orderedRight[i],
+                  locked: locked,
+                  reduceMotion: reduceMotion,
+                  usedRight: usedRight,
+                ),
+                const SizedBox(height: 10),
+              ],
+              const SizedBox(height: 4),
+              Text(
+                'Đã ghép ${_pairs.length}/${left.length}',
+                textAlign: TextAlign.center,
+                style: DauVietTypography.bodySmall.copyWith(
+                  color: _pairs.length == left.length
+                      ? const Color(0xFF2B1F17)
+                      : const Color(0xFF4A3C2E),
+                  fontWeight: FontWeight.w800,
+                  fontSize: 13,
+                ),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 12),
+        InlineGradingHint(
+          evaluation: widget.lastEvaluation,
+          maxAttempts: widget.activity.maxAttempts,
+        ),
+        SubmitBar(
+          enabled: _pairs.length == left.length,
+          submitting: widget.submitting,
+          onPressed: () => widget.onSubmit({
+            'pairs': [
+              for (final e in _pairs.entries)
+                {'leftId': e.key, 'rightId': e.value},
+            ],
+          }),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildMatchRow({
+    required int index,
+    required Map<String, dynamic>? leftItem,
+    required Map<String, dynamic>? rightItem,
+    required bool locked,
+    required bool reduceMotion,
+    required Set<String> usedRight,
+  }) {
+    final String? leftId = leftItem?['id'] as String?;
+    final String? rightId = rightItem?['id'] as String?;
+
+    // Hàng này được xem là đã ghép nối nếu leftId và rightId đã kết nối với nhau
+    final bool isRowPaired =
+        leftId != null && rightId != null && _pairs[leftId] == rightId;
+
+    final bool isLeftSelected = leftId != null && _activeLeft == leftId;
+    final bool isRightUsed = rightId != null && usedRight.contains(rightId);
+
+    return IntrinsicHeight(
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          // 1. Thẻ bên trái: Nhân vật / Hiện vật
+          Expanded(
+            flex: 4,
+            child: leftItem != null && leftId != null
+                ? Draggable<String>(
+                    data: leftId,
+                    maxSimultaneousDrags: locked ? 0 : 1,
+                    feedback: Material(
+                      color: DauVietColors.paperCard,
+                      borderRadius: BorderRadius.circular(12),
+                      elevation: 6,
+                      child: ConstrainedBox(
+                        constraints: const BoxConstraints(maxWidth: 160),
+                        child: Opacity(
+                          opacity: 0.94,
+                          child: _LeftMatchCard(
+                            label:
+                                (leftItem['label'] ??
+                                        leftItem['text'] ??
+                                        leftItem['id'])
+                                    as String,
+                            imageAsset: _imageForLeft(
+                              (leftItem['label'] ?? leftItem['text'] ?? '')
+                                  as String,
+                              (leftItem['id'] ?? '') as String,
+                            ),
+                            selected: true,
+                            paired: isRowPaired,
+                            enabled: !locked,
+                            reduceMotion: reduceMotion,
+                            onTap: () {},
+                          ),
+                        ),
+                      ),
+                    ),
+                    childWhenDragging: Opacity(
+                      opacity: 0.45,
+                      child: _LeftMatchCard(
+                        label:
+                            (leftItem['label'] ??
+                                    leftItem['text'] ??
+                                    leftItem['id'])
+                                as String,
+                        imageAsset: _imageForLeft(
+                          (leftItem['label'] ?? leftItem['text'] ?? '')
+                              as String,
+                          (leftItem['id'] ?? '') as String,
+                        ),
+                        selected: true,
+                        paired: isRowPaired,
+                        enabled: !locked,
+                        reduceMotion: reduceMotion,
+                        onTap: () {},
+                      ),
+                    ),
+                    child: _LeftMatchCard(
+                      label:
+                          (leftItem['label'] ??
+                                  leftItem['text'] ??
+                                  leftItem['id'])
+                              as String,
+                      imageAsset: _imageForLeft(
+                        (leftItem['label'] ?? leftItem['text'] ?? '') as String,
+                        (leftItem['id'] ?? '') as String,
+                      ),
+                      selected: isLeftSelected,
+                      paired: isRowPaired,
+                      enabled: !locked,
+                      reduceMotion: reduceMotion,
+                      onTap: () => _tapLeft(leftId),
+                    ),
+                  )
+                : const SizedBox.shrink(),
+          ),
+
+          // 2. Điểm neo kết nối giữa hai thẻ trong cùng một hàng
+          _ConnectorDot(isPaired: isRowPaired, isActive: isLeftSelected),
+
+          // 3. Thẻ bên phải: Thông tin mô tả đã snap lên ngang hàng với thẻ trái
+          Expanded(
+            flex: 5,
+            child: rightItem != null && rightId != null
+                ? DragTarget<String>(
+                    onWillAcceptWithDetails: (details) =>
+                        !locked && details.data.isNotEmpty,
+                    onAcceptWithDetails: (details) =>
+                        _pairByDrag(details.data, rightId),
+                    builder: (context, candidateData, _) {
+                      final bool hovering = candidateData.isNotEmpty;
+                      return _RightMatchCard(
+                        label:
+                            (rightItem['label'] ??
+                                    rightItem['text'] ??
+                                    rightItem['id'])
+                                as String,
+                        selected: hovering,
+                        paired: isRowPaired,
+                        enabled:
+                            !locked && (_activeLeft != null || isRightUsed),
+                        reduceMotion: reduceMotion,
+                        onTap: () {
+                          if (isRightUsed && _activeLeft == null) {
+                            _unpairRight(rightId);
+                          } else {
+                            _tapRight(rightId);
+                          }
+                        },
+                      );
+                    },
+                  )
+                : const SizedBox.shrink(),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ConnectorDot extends StatelessWidget {
+  final bool isPaired;
+  final bool isActive;
+
+  const _ConnectorDot({required this.isPaired, required this.isActive});
+
+  @override
+  Widget build(BuildContext context) {
+    final Color dotColor = isPaired
+        ? DauVietColors.natureGreen
+        : (isActive ? DauVietColors.jade : DauVietColors.outlineVariant);
+
+    return SizedBox(
+      width: 22,
+      child: Center(
+        child: Container(
+          width: 10,
+          height: 10,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            color: dotColor,
+            boxShadow: isPaired ? DauVietColors.pixelShadowSm : null,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _LeftMatchCard extends StatelessWidget {
+  final String label;
+  final String? imageAsset;
+  final bool selected;
+  final bool paired;
+  final bool enabled;
+  final bool reduceMotion;
+  final VoidCallback onTap;
+
+  const _LeftMatchCard({
+    required this.label,
+    this.imageAsset,
+    required this.selected,
+    required this.paired,
+    required this.enabled,
+    required this.reduceMotion,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final Color bg = (paired || selected)
+        ? DauVietColors.paperCardHi
+        : DauVietColors.paperCard;
+    final Color border = paired
+        ? DauVietColors.natureGreen
+        : (selected ? DauVietColors.jade : DauVietColors.outlineVariant);
+    final double borderWidth = (paired || selected) ? 2.0 : 1.4;
+
+    final bool narrowScreen = MediaQuery.sizeOf(context).width < 380;
+    final double thumbSize = (narrowScreen && imageAsset == null) ? 28 : 36;
+
+    return Semantics(
+      button: true,
+      selected: selected || paired,
+      enabled: enabled,
+      label: label,
+      child: TactileCard(
+        padding: const EdgeInsets.all(10),
+        borderRadius: 12,
+        backgroundColor: bg,
+        borderColor: border,
+        borderWidth: borderWidth,
+        enabled: enabled,
+        onTap: enabled ? onTap : null,
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(minHeight: 44),
+          child: Row(
+            children: [
+              ClipRRect(
+                borderRadius: BorderRadius.circular(8),
+                child: SizedBox(
+                  width: thumbSize,
+                  height: thumbSize,
+                  child: imageAsset != null
+                      ? Image.asset(
+                          imageAsset!,
+                          fit: BoxFit.cover,
+                          errorBuilder: (_, _, _) => _fallbackIcon(),
+                        )
+                      : _fallbackIcon(),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  label,
+                  style: DauVietTypography.bodyMedium.copyWith(
+                    fontWeight: (selected || paired)
+                        ? FontWeight.w800
+                        : FontWeight.w600,
+                    fontSize: 13,
+                    color: DauVietColors.inkText,
+                    height: 1.35,
+                  ),
+                ),
+              ),
+              if (paired) ...[
+                const SizedBox(width: 6),
+                const StampSealBadge.success('✓', size: 24),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _fallbackIcon() {
+    return Container(
+      color: DauVietColors.paperCardHi,
+      child: const Icon(
+        Icons.account_balance_rounded,
+        size: 20,
+        color: DauVietColors.imperialGoldDark,
+      ),
+    );
+  }
+}
+
+class _RightMatchCard extends StatelessWidget {
+  final String label;
+  final bool selected;
+  final bool paired;
+  final bool enabled;
+  final bool reduceMotion;
+  final VoidCallback onTap;
+
+  const _RightMatchCard({
+    required this.label,
+    required this.selected,
+    required this.paired,
+    required this.enabled,
+    required this.reduceMotion,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final Color bg = (paired || selected)
+        ? DauVietColors.paperCardHi
+        : DauVietColors.paperCard;
+    final Color border = paired
+        ? DauVietColors.natureGreen
+        : (selected ? DauVietColors.jade : DauVietColors.outlineVariant);
+    final double borderWidth = (paired || selected) ? 2.0 : 1.4;
+
+    return Semantics(
+      button: true,
+      selected: selected || paired,
+      enabled: enabled,
+      label: label,
+      child: TactileCard(
+        padding: const EdgeInsets.all(10),
+        borderRadius: 12,
+        backgroundColor: bg,
+        borderColor: border,
+        borderWidth: borderWidth,
+        enabled: enabled,
+        onTap: enabled ? onTap : null,
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(minHeight: 44),
+          child: Row(
+            children: [
+              Expanded(
+                child: Text(
+                  label,
+                  style: DauVietTypography.bodySmall.copyWith(
+                    fontWeight: paired ? FontWeight.w700 : FontWeight.w500,
+                    fontSize: 13,
+                    color: paired
+                        ? DauVietColors.heritageGreen
+                        : DauVietColors.inkSecondary,
+                    height: 1.35,
+                  ),
+                ),
+              ),
+              if (paired) ...[
+                const SizedBox(width: 6),
+                const StampSealBadge.success('✓', size: 24),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}

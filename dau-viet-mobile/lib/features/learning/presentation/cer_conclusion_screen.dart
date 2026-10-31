@@ -7,6 +7,7 @@ import '../../../core/widgets/ambient_atmosphere_overlay.dart';
 import '../../../core/widgets/bite_sized_completion_modal.dart';
 import '../../../core/widgets/combo_streak_badge_widget.dart';
 import '../../../core/widgets/dong_son_button.dart';
+import '../../../core/widgets/energy_pill.dart';
 import '../../../core/widgets/interactive_historical_mascot_widget.dart';
 import '../../../core/widgets/parchment_card.dart';
 import '../../../core/widgets/sound_toggle_button.dart';
@@ -29,20 +30,24 @@ class _CerConclusionScreenState extends State<CerConclusionScreen> {
     {
       'id': 'evi_1',
       'title': 'Di Chỉ Khảo Cổ Bãi Cọc Yên Giang (Quảng Ninh)',
-      'desc': 'Hàng trăm cọc gỗ lim bịt sắt cắm nghiêng 15-45 độ xuôi theo dòng chảy, định tuổi Carbon phóng xạ C-14 thế kỷ X SCN.',
+      'desc':
+          'Hàng trăm cọc gỗ lim bịt sắt cắm nghiêng 15-45 độ xuôi theo dòng chảy, định tuổi Carbon phóng xạ C-14 thế kỷ X SCN.',
       'isStrong': true,
     },
     {
       'id': 'evi_2',
       'title': 'Truyền Thuyết Dân Gian Về Vị Tướng Đánh Cá',
-      'desc': 'Giai thoại truyền miệng qua nhiều thế hệ của cư dân ven cửa biển sông Bạch Đằng.',
+      'desc':
+          'Giai thoại truyền miệng qua nhiều thế hệ của cư dân ven cửa biển sông Bạch Đằng.',
       'isStrong': false,
     },
   ];
 
   bool get _isStrongEvidence {
     if (_selectedEvidenceId == null) return false;
-    final item = _evidenceOptions.firstWhere((e) => e['id'] == _selectedEvidenceId);
+    final item = _evidenceOptions.firstWhere(
+      (e) => e['id'] == _selectedEvidenceId,
+    );
     return item['isStrong'] as bool;
   }
 
@@ -55,8 +60,8 @@ class _CerConclusionScreenState extends State<CerConclusionScreen> {
     final mascotMessage = !_isSubmitted
         ? 'Hãy chọn nguồn bằng chứng có tính thực chứng khảo cổ học cao nhất để hoàn thiện mô hình CER!'
         : (_isStrongEvidence
-            ? 'Hoan hô! Luận điểm vững chắc kết hợp di chỉ khảo cổ Yên Giang giúp phục dựng lịch sử chân thực nhất!'
-            : 'Truyền thuyết dân gian rất giàu cảm xúc nhưng chưa đủ tính xác thực khoa học bằng di chỉ bãi cọc khảo cổ.');
+              ? 'Hoan hô! Luận điểm vững chắc kết hợp di chỉ khảo cổ Yên Giang giúp phục dựng lịch sử chân thực nhất!'
+              : 'Truyền thuyết dân gian rất giàu cảm xúc nhưng chưa đủ tính xác thực khoa học bằng di chỉ bãi cọc khảo cổ.');
 
     return Scaffold(
       backgroundColor: DauVietColors.parchmentSurface,
@@ -73,7 +78,10 @@ class _CerConclusionScreenState extends State<CerConclusionScreen> {
               // 2. Nội dung cuộn chính
               Expanded(
                 child: SingleChildScrollView(
-                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 16,
+                    vertical: 12,
+                  ),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
@@ -130,7 +138,9 @@ class _CerConclusionScreenState extends State<CerConclusionScreen> {
                           label: _isStrongEvidence
                               ? 'HOÀN THÀNH & KHẢI HOÀN CHIẾN DỊCH (M-18) ›'
                               : 'CHỌN LẠI BẰNG CHỨNG MẠNH NHẤT',
-                          icon: _isStrongEvidence ? Icons.emoji_events_rounded : Icons.replay_rounded,
+                          icon: _isStrongEvidence
+                              ? Icons.emoji_events_rounded
+                              : Icons.replay_rounded,
                           variant: DongSonButtonVariant.primaryCinnabar,
                           height: 52,
                           onPressed: () {
@@ -138,15 +148,18 @@ class _CerConclusionScreenState extends State<CerConclusionScreen> {
                               BiteSizedCompletionModal.show(
                                 context: context,
                                 title: 'TOÀN THẮNG CHIẾN DỊCH!',
-                                subtitle: 'Bạn đã hoàn thiện xuất sắc mô hình lập luận CER và minh định toàn bộ 4 Dấu Vết Bạch Đằng 938!',
+                                subtitle:
+                                    'Bạn đã hoàn thiện xuất sắc mô hình lập luận CER và minh định toàn bộ 4 Dấu Vết Bạch Đằng 938!',
                                 scorePoints: 200,
                                 xpPoints: 100,
                                 accuracy: 1.0,
                                 streakCount: 7,
-                                multiplier: 2.0,
-                                badgeAsset: 'assets/badges/badge_trace_1_context.png',
+                                badgeAsset:
+                                    'assets/badges/badge_trace_1_context.png',
                                 onContinue: () {
-                                  context.go('/rewards/victory');
+                                  // Demo flow không gắn attempt — về dashboard,
+                                  // không đi qua fabricated victory screen.
+                                  context.go('/dashboard');
                                 },
                               );
                             } else {
@@ -191,7 +204,7 @@ class _CerConclusionScreenState extends State<CerConclusionScreen> {
               if (context.canPop()) {
                 context.pop();
               } else {
-                context.go('/traces/evt_bach_dang_938');
+                context.go('/dashboard');
               }
             },
           ),
@@ -203,7 +216,10 @@ class _CerConclusionScreenState extends State<CerConclusionScreen> {
                 Row(
                   children: [
                     Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 6,
+                        vertical: 2,
+                      ),
                       decoration: BoxDecoration(
                         color: DauVietColors.cinnabarRed,
                         borderRadius: BorderRadius.circular(4),
@@ -243,10 +259,13 @@ class _CerConclusionScreenState extends State<CerConclusionScreen> {
           ),
           const SoundToggleButton(),
           const SizedBox(width: 8),
-          const ComboStreakBadgeWidget(
-            streakCount: 7,
-            multiplier: 2.0,
+          const EnergyPill(
+            energy: 100,
+            maxEnergy: 100,
+            showHistoryPoints: false,
           ),
+          const SizedBox(width: 8),
+          const ComboStreakBadgeWidget(streakCount: 7),
         ],
       ),
     );
@@ -269,7 +288,11 @@ class _CerConclusionScreenState extends State<CerConclusionScreen> {
               shape: BoxShape.circle,
               color: DauVietColors.cinnabarRed,
             ),
-            child: const Icon(Icons.school_rounded, color: Colors.white, size: 18),
+            child: const Icon(
+              Icons.school_rounded,
+              color: Colors.white,
+              size: 18,
+            ),
           ),
           const SizedBox(width: 10),
           Expanded(
@@ -314,7 +337,11 @@ class _CerConclusionScreenState extends State<CerConclusionScreen> {
                 ),
               ),
               const Spacer(),
-              const Icon(Icons.verified_rounded, size: 18, color: DauVietColors.imperialGold),
+              const Icon(
+                Icons.verified_rounded,
+                size: 18,
+                color: DauVietColors.imperialGold,
+              ),
             ],
           ),
           const SizedBox(height: 10),
@@ -397,15 +424,22 @@ class _CerConclusionScreenState extends State<CerConclusionScreen> {
                 decoration: BoxDecoration(
                   color: bgCol,
                   borderRadius: BorderRadius.circular(10),
-                  border: Border.all(color: borderCol, width: isSelected || (_isSubmitted && isStrong) ? 1.8 : 1.0),
+                  border: Border.all(
+                    color: borderCol,
+                    width: isSelected || (_isSubmitted && isStrong) ? 1.8 : 1.0,
+                  ),
                   boxShadow: isSelected ? DauVietColors.heritageShadow : null,
                 ),
                 child: Row(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Icon(
-                      isSelected ? Icons.radio_button_checked_rounded : Icons.radio_button_off_rounded,
-                      color: isSelected ? DauVietColors.cinnabarRed : DauVietColors.inkMuted,
+                      isSelected
+                          ? Icons.radio_button_checked_rounded
+                          : Icons.radio_button_off_rounded,
+                      color: isSelected
+                          ? DauVietColors.cinnabarRed
+                          : DauVietColors.inkMuted,
                       size: 20,
                     ),
                     const SizedBox(width: 10),
@@ -427,7 +461,9 @@ class _CerConclusionScreenState extends State<CerConclusionScreen> {
                             style: DauVietTypography.bodySmall.copyWith(
                               fontSize: 11,
                               height: 1.35,
-                              color: DauVietColors.inkText.withValues(alpha: 0.85),
+                              color: DauVietColors.inkText.withValues(
+                                alpha: 0.85,
+                              ),
                             ),
                           ),
                         ],
@@ -448,10 +484,14 @@ class _CerConclusionScreenState extends State<CerConclusionScreen> {
     return Container(
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
-        color: _isStrongEvidence ? const Color(0xFFEAF5EE) : const Color(0xFFFDEEEC),
+        color: _isStrongEvidence
+            ? const Color(0xFFEAF5EE)
+            : const Color(0xFFFDEEEC),
         borderRadius: BorderRadius.circular(12),
         border: Border.all(
-          color: _isStrongEvidence ? DauVietColors.natureGreen : DauVietColors.cinnabarRed,
+          color: _isStrongEvidence
+              ? DauVietColors.natureGreen
+              : DauVietColors.cinnabarRed,
           width: 1.8,
         ),
       ),
@@ -462,9 +502,14 @@ class _CerConclusionScreenState extends State<CerConclusionScreen> {
             children: [
               Expanded(
                 child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 8,
+                    vertical: 3,
+                  ),
                   decoration: BoxDecoration(
-                    color: _isStrongEvidence ? DauVietColors.natureGreen : DauVietColors.cinnabarRed,
+                    color: _isStrongEvidence
+                        ? DauVietColors.natureGreen
+                        : DauVietColors.cinnabarRed,
                     borderRadius: BorderRadius.circular(4),
                   ),
                   child: Text(
@@ -517,7 +562,11 @@ class _CerConclusionScreenState extends State<CerConclusionScreen> {
               ),
               child: Row(
                 children: [
-                  const Icon(Icons.stars_rounded, color: DauVietColors.imperialGold, size: 20),
+                  const Icon(
+                    Icons.stars_rounded,
+                    color: DauVietColors.imperialGold,
+                    size: 20,
+                  ),
                   const SizedBox(width: 8),
                   Expanded(
                     child: Text(

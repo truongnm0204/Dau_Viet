@@ -1,9 +1,15 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:dau_viet_mobile/core/widgets/ambient_atmosphere_overlay.dart';
 import 'package:dau_viet_mobile/core/widgets/interactive_historical_mascot_widget.dart';
+import 'package:dau_viet_mobile/features/energy/data/energy_providers.dart';
 import 'package:dau_viet_mobile/features/learning/presentation/context_reader_screen.dart';
 import 'package:dau_viet_mobile/features/learning/presentation/multiple_choice_quiz_screen.dart';
+import 'package:dau_viet_mobile/features/rewards/data/reward_dtos.dart';
+import 'package:dau_viet_mobile/features/rewards/data/reward_providers.dart';
+
+import 'fakes/fake_energy_repository.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -58,7 +64,9 @@ void main() {
       expect(find.text('Hãy đọc kỹ lời bình sử thi!'), findsOneWidget);
     });
 
-    testWidgets('Renders cheering state with celebration message', (tester) async {
+    testWidgets('Renders cheering state with celebration message', (
+      tester,
+    ) async {
       await tester.pumpWidget(
         const MaterialApp(
           home: Scaffold(
@@ -70,7 +78,7 @@ void main() {
         ),
       );
 
-      expect(find.text('SĨ TỬ KHEN NGỢI'), findsOneWidget);
+      expect(find.text('TÊ GIÁC KHEN NGỢI'), findsOneWidget);
       expect(find.text('Khải hoàn thắng lợi!'), findsOneWidget);
     });
 
@@ -86,7 +94,7 @@ void main() {
         ),
       );
 
-      expect(find.text('SĨ TỬ GỢI Ý'), findsOneWidget);
+      expect(find.text('TÊ GIÁC GỢI Ý'), findsOneWidget);
       expect(find.text('Gợi ý: Cọc gỗ lim vót nhọn.'), findsOneWidget);
     });
 
@@ -112,10 +120,22 @@ void main() {
   });
 
   group('Screen Visual Storytelling Integration Tests', () {
-    testWidgets('ContextReaderScreen renders with mascot guide', (tester) async {
+    testWidgets('ContextReaderScreen renders with mascot guide', (
+      tester,
+    ) async {
+      // ProviderScope + fake energy repo: EnergyPill trong header giờ đọc
+      // energyProvider (GAME-03) — override để không gọi HTTP thật.
       await tester.pumpWidget(
-        const MaterialApp(
-          home: ContextReaderScreen(),
+        ProviderScope(
+          overrides: [
+            energyRepositoryProvider.overrideWithValue(FakeEnergyRepository()),
+            // EnergyPill watch rewardSummaryProvider — trả giá trị tĩnh
+            // để không gọi HTTP thật trong widget test.
+            rewardSummaryProvider.overrideWith(
+              (ref) async => RewardSummaryDto.empty,
+            ),
+          ],
+          child: const MaterialApp(home: ContextReaderScreen()),
         ),
       );
 
@@ -123,10 +143,18 @@ void main() {
       expect(find.byType(AmbientAtmosphereOverlay), findsOneWidget);
     });
 
-    testWidgets('MultipleChoiceQuizScreen renders with dynamic mascot', (tester) async {
+    testWidgets('MultipleChoiceQuizScreen renders with dynamic mascot', (
+      tester,
+    ) async {
       await tester.pumpWidget(
-        const MaterialApp(
-          home: MultipleChoiceQuizScreen(),
+        ProviderScope(
+          overrides: [
+            energyRepositoryProvider.overrideWithValue(FakeEnergyRepository()),
+            rewardSummaryProvider.overrideWith(
+              (ref) async => RewardSummaryDto.empty,
+            ),
+          ],
+          child: const MaterialApp(home: MultipleChoiceQuizScreen()),
         ),
       );
 

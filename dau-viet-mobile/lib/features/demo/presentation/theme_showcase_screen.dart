@@ -4,6 +4,17 @@ import '../../../core/theme/dau_viet_typography.dart';
 import '../../../core/widgets/dong_son_button.dart';
 import '../../../core/widgets/heritage_scaffold.dart';
 import '../../../core/widgets/parchment_card.dart';
+import '../../../core/widgets/section_divider.dart';
+import '../../../core/widgets/chapter_number_badge.dart';
+import '../../../core/widgets/clue_tag.dart';
+import '../../../core/widgets/stamp_seal_badge.dart';
+import '../../../core/widgets/step_progress_bar.dart';
+import '../../../core/widgets/rare_frame_badge.dart';
+import '../../../core/widgets/tactile_card.dart';
+import '../../../core/widgets/hero_paper_banner.dart';
+import '../../../core/widgets/empty_state_card.dart';
+import '../../../core/widgets/mascot_slot.dart';
+import '../../../core/widgets/kabi_mascot_widget.dart';
 
 /// Màn hình Trưng bày & Kiểm định Theme Di sản v2.0 (Phase M1 Showcase)
 class ThemeShowcaseScreen extends StatelessWidget {
@@ -30,7 +41,10 @@ class ThemeShowcaseScreen extends StatelessWidget {
                   Row(
                     children: [
                       Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 10,
+                          vertical: 4,
+                        ),
                         decoration: BoxDecoration(
                           color: DauVietColors.cinnabarRed,
                           borderRadius: BorderRadius.circular(6),
@@ -44,23 +58,33 @@ class ThemeShowcaseScreen extends StatelessWidget {
                         ),
                       ),
                       const Spacer(),
-                      const Icon(Icons.verified_rounded, color: DauVietColors.natureGreen, size: 20),
+                      const Icon(
+                        Icons.verified_rounded,
+                        color: DauVietColors.natureGreen,
+                        size: 20,
+                      ),
                       const SizedBox(width: 4),
                       Text(
                         'Chuẩn GDPT 2018',
-                        style: DauVietTypography.labelSmall.copyWith(color: DauVietColors.natureGreen),
+                        style: DauVietTypography.labelSmall.copyWith(
+                          color: DauVietColors.natureGreen,
+                        ),
                       ),
                     ],
                   ),
                   const SizedBox(height: 12),
                   Text(
                     'Đại Chiến Bạch Đằng 938',
-                    style: DauVietTypography.headlineLarge.copyWith(color: DauVietColors.cinnabarRed),
+                    style: DauVietTypography.headlineLarge.copyWith(
+                      color: DauVietColors.cinnabarRed,
+                    ),
                   ),
                   const SizedBox(height: 6),
                   Text(
                     'Hồi 2: Kế sách cọc ngầm & Phối hợp quy luật thủy triều',
-                    style: DauVietTypography.headlineSmall.copyWith(color: DauVietColors.inkText),
+                    style: DauVietTypography.headlineSmall.copyWith(
+                      color: DauVietColors.inkText,
+                    ),
                   ),
                   const SizedBox(height: 10),
                   Text(
@@ -73,46 +97,99 @@ class ThemeShowcaseScreen extends StatelessWidget {
             const SizedBox(height: 24),
 
             // Typography Showcase
-            Text('HỆ THỐNG TYPOGRAPHY', style: DauVietTypography.labelMedium.copyWith(color: DauVietColors.inkMuted)),
+            Text(
+              'HỆ THỐNG TYPOGRAPHY',
+              style: DauVietTypography.labelMedium.copyWith(
+                color: DauVietColors.inkMuted,
+              ),
+            ),
             const SizedBox(height: 8),
             ParchmentCard(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text('Noto Serif Tiêu Đề Lớn (26px)', style: DauVietTypography.headlineLarge),
-                  const Divider(color: DauVietColors.outlineVariant, height: 20),
-                  Text('Noto Serif Niên Đại & Mục (20px)', style: DauVietTypography.headlineMedium),
-                  const Divider(color: DauVietColors.outlineVariant, height: 20),
+                  Text(
+                    'Noto Serif Tiêu Đề Lớn (26px)',
+                    style: DauVietTypography.headlineLarge,
+                  ),
+                  const Divider(
+                    color: DauVietColors.outlineVariant,
+                    height: 20,
+                  ),
+                  Text(
+                    'Noto Serif Niên Đại & Mục (20px)',
+                    style: DauVietTypography.headlineMedium,
+                  ),
+                  const Divider(
+                    color: DauVietColors.outlineVariant,
+                    height: 20,
+                  ),
                   Text(
                     'Trích Đại Việt Sử Ký Toàn Thư: "Quyền nghe tin Hoằng Tháo sắp đến, bảo các tướng tá rằng: Hoằng Tháo là đứa trẻ khờ dại..."',
                     style: DauVietTypography.ancientCitation,
                   ),
-                  const Divider(color: DauVietColors.outlineVariant, height: 20),
-                  Text('Be Vietnam Pro - Nội dung mô tả và giải thích khoa học dễ đọc trên mọi thiết bị di động (14px).', style: DauVietTypography.bodyMedium),
+                  const Divider(
+                    color: DauVietColors.outlineVariant,
+                    height: 20,
+                  ),
+                  Text(
+                    'Be Vietnam Pro - Nội dung mô tả và giải thích khoa học dễ đọc trên mọi thiết bị di động (14px).',
+                    style: DauVietTypography.bodyMedium,
+                  ),
                 ],
               ),
             ),
             const SizedBox(height: 24),
 
             // Color Palette Chips
-            Text('BẢNG MÀU VĂN HIẾN ĐẠI VIỆT', style: DauVietTypography.labelMedium.copyWith(color: DauVietColors.inkMuted)),
+            Text(
+              'BẢNG MÀU VĂN HIẾN ĐẠI VIỆT',
+              style: DauVietTypography.labelMedium.copyWith(
+                color: DauVietColors.inkMuted,
+              ),
+            ),
             const SizedBox(height: 8),
             Wrap(
               spacing: 10,
               runSpacing: 10,
               children: [
-                _buildColorChip('Đỏ Chu Sa', DauVietColors.cinnabarRed, Colors.white),
-                _buildColorChip('Vàng Ngự Xưởng', DauVietColors.imperialGold, DauVietColors.inkText),
-                _buildColorChip('Lục Ngàn', DauVietColors.natureGreen, Colors.white),
-                _buildColorChip('Lam Giang', DauVietColors.riverBlue, Colors.white),
-                _buildColorChip('Nâu Gỗ Lim', DauVietColors.woodBrown, Colors.white),
+                _buildColorChip(
+                  'Đỏ Chu Sa',
+                  DauVietColors.cinnabarRed,
+                  Colors.white,
+                ),
+                _buildColorChip(
+                  'Vàng Ngự Xưởng',
+                  DauVietColors.imperialGold,
+                  DauVietColors.inkText,
+                ),
+                _buildColorChip(
+                  'Lục Ngàn',
+                  DauVietColors.natureGreen,
+                  Colors.white,
+                ),
+                _buildColorChip(
+                  'Lam Giang',
+                  DauVietColors.riverBlue,
+                  Colors.white,
+                ),
+                _buildColorChip(
+                  'Nâu Gỗ Lim',
+                  DauVietColors.woodBrown,
+                  Colors.white,
+                ),
                 _buildColorChip('Mực Nho', DauVietColors.inkText, Colors.white),
               ],
             ),
             const SizedBox(height: 24),
 
             // Action Buttons
-            Text('HỆ THỐNG NÚT BẤM ĐÔNG SƠN', style: DauVietTypography.labelMedium.copyWith(color: DauVietColors.inkMuted)),
+            Text(
+              'HỆ THỐNG NÚT BẤM ĐÔNG SƠN',
+              style: DauVietTypography.labelMedium.copyWith(
+                color: DauVietColors.inkMuted,
+              ),
+            ),
             const SizedBox(height: 8),
             Column(
               children: [
@@ -122,7 +199,11 @@ class ThemeShowcaseScreen extends StatelessWidget {
                   variant: DongSonButtonVariant.primaryCinnabar,
                   onPressed: () {
                     ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(content: Text('Đang khởi tạo luồng khám phá Bạch Đằng 938!')),
+                      const SnackBar(
+                        content: Text(
+                          'Đang khởi tạo luồng khám phá Bạch Đằng 938!',
+                        ),
+                      ),
                     );
                   },
                 ),
@@ -141,6 +222,128 @@ class ThemeShowcaseScreen extends StatelessWidget {
                   onPressed: () {},
                 ),
               ],
+            ),
+            const SizedBox(height: 32),
+
+            // ─── v3.0 ATOMS ───
+            const SectionDivider(
+              eyebrow: 'v3.0',
+              title: 'Bộ Linh Kiện Di Sản Sống',
+            ),
+
+            const HeroPaperBanner(
+              eyebrow: 'Chương 02 · Trận then chốt',
+              title: 'Bạch Đằng Giang 938',
+              subtitle: 'Cuộc hải chiến chấm dứt 1000 năm Bắc thuộc',
+              height: 180,
+            ),
+            const SizedBox(height: 20),
+
+            Text(
+              'TIẾN TRÌNH 6 CHẶNG',
+              style: DauVietTypography.labelMedium.copyWith(
+                color: DauVietColors.inkMuted,
+              ),
+            ),
+            const SizedBox(height: 8),
+            const TactileCard(
+              child: StepProgressBar(currentStep: 2, showLabels: true),
+            ),
+            const SizedBox(height: 20),
+
+            Text(
+              'HUY HIỆU & ĐÓNG DẤU',
+              style: DauVietTypography.labelMedium.copyWith(
+                color: DauVietColors.inkMuted,
+              ),
+            ),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 14,
+              runSpacing: 14,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              children: const [
+                ChapterNumberBadge('01'),
+                ChapterNumberBadge('02'),
+                ChapterNumberBadge.filled('✓', size: 44),
+                ChapterNumberBadge('04', size: 56),
+                StampSealBadge('DẤU'),
+                StampSealBadge.success('✓'),
+                StampSealBadge.outline('?'),
+              ],
+            ),
+            const SizedBox(height: 20),
+
+            Text(
+              'TAG DẤU VẾT',
+              style: DauVietTypography.labelMedium.copyWith(
+                color: DauVietColors.inkMuted,
+              ),
+            ),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                ClueTag.category('hiện vật'),
+                ClueTag.category('địa hình'),
+                ClueTag.category('nhân vật'),
+                ClueTag.category('cổ thư'),
+                const ClueTag('Thủy triều', icon: Icons.water_outlined),
+              ],
+            ),
+            const SizedBox(height: 20),
+
+            Text(
+              'ĐỘ HIẾM BẢO VẬT',
+              style: DauVietTypography.labelMedium.copyWith(
+                color: DauVietColors.inkMuted,
+              ),
+            ),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 12,
+              runSpacing: 12,
+              children: [
+                for (final r in ItemRarity.values)
+                  RareFrameBadge(
+                    rarity: r,
+                    showLabel: true,
+                    child: Container(
+                      width: 72,
+                      height: 72,
+                      decoration: BoxDecoration(
+                        color: DauVietColors.paperCardHi,
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: const Icon(
+                        Icons.workspace_premium_outlined,
+                        color: DauVietColors.woodBrown,
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 20),
+
+            Text(
+              'LINH VẬT ĐỒNG HÀNH',
+              style: DauVietTypography.labelMedium.copyWith(
+                color: DauVietColors.inkMuted,
+              ),
+            ),
+            const SizedBox(height: 8),
+            const MascotSlot(
+              message: 'Chọn một dấu vết để Tê Giác giúp bạn suy luận nhé!',
+              mood: KabiMood.guiding,
+            ),
+            const SizedBox(height: 12),
+            const EmptyStateCard(
+              title: 'Chưa có bảo vật nào',
+              description:
+                  'Hoàn thành bài học để mở khóa bảo vật đầu tiên trong bảo tàng của bạn.',
+              actionLabel: 'Bắt đầu học',
+              icon: Icons.museum_outlined,
             ),
             const SizedBox(height: 32),
           ],

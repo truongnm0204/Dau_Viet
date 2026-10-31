@@ -41,7 +41,10 @@ erDiagram
 
 | Table | Trường chính | Ghi chú |
 |---|---|---|
-| `users` | `id`, `email`, `password_hash`, `role`, `display_name`, `created_at` | Role tối thiểu `LEARNER`, `CONTENT_ADMIN`; password hash không trả client |
+| `users` | `id`, `email`, `password_hash` (nullable từ V53), `role`, `display_name`, `status`, `email_verified_at`, `last_login_at`, `created_at`, `row_version` | Role `LEARNER`, `CONTENT_ADMIN`; status `ACTIVE/LOCKED/DISABLED`; `password_hash` NULL cho tài khoản Google-only (login password → INVALID_CREDENTIALS); hash không trả client |
+| `auth_refresh_tokens` | `id`, `user_id` → users, `token_hash` UNIQUE, `token_family_id`, `previous_token_id`, `expires_at`, `revoked_at`, `last_used_at` | Chỉ lưu SHA-256 của raw token; rotation revoke theo family (reuse detection); password reset revoke theo `user_id` (V53 flow) |
+| `auth_otp_challenges` | `id`, `email` (lowercase), `purpose` (`REGISTER_VERIFY`/`PASSWORD_RESET`), `code_hash` (salted SHA-256), `payload_json` JSONB, `attempts`, `max_attempts` (5), `expires_at`, `consumed_at`, `created_at` | **V53 (Issue #34)** — partial unique `ux_otp_active (lower(email), purpose) WHERE consumed_at IS NULL` → tối đa 1 challenge active/(email,purpose); `payload_json` mang `{displayName,passwordHash,salt}` (register) hoặc `{userId,salt}` (reset); plaintext OTP không bao giờ lưu |
+| `user_oauth_accounts` | `id`, `user_id` → users CASCADE, `provider` (`GOOGLE`), `provider_subject`, `provider_email`, `created_at` | **V53 (Issue #34)** — `UNIQUE (provider, provider_subject)`; Google `sub` link 1-1 về user; index `(user_id)` |
 | `historical_events` | `id`, `title`, `period`, `start_year`, `summary`, `cover_asset_id`, `status` | Dữ liệu tri thức; không lẫn lesson |
 | `lesson_templates` | `id`, `code`, `name`, `schema_version`, `preset_json`, `enabled` | Preset stage/activity/rule (không chứa nội dung sự kiện) |
 | `lessons` | `id`, `event_id`, `template_id`, `title`, `central_question`, `objectives_json`, `draft_json`, `status`, `current_version_id` | Chỉnh sửa ở draft; `current_version_id` có thể null ban đầu |
@@ -50,12 +53,131 @@ erDiagram
 | `assets` | `id`, `storage_key`, `mime_type`, `size_bytes`, `checksum`, `state`, `created_at` | Lưu metadata; file nằm trong object storage |
 | `learner_attempts` | `id`, `user_id`, `lesson_version_id`, `status`, `current_stage_id`, `current_activity_id`, `state_json`, `started_at`, `completed_at` | Status `IN_PROGRESS`, `COMPLETED`, `ABANDONED`; ID stage/activity là stable IDs trong snapshot |
 | `activity_attempts` | `id`, `learner_attempt_id`, `activity_id`, `attempt_no`, `submitted_answer_json`, `result_json`, `created_at` | Giữ lịch sử retry/revision, không sửa lesson config |
-| `idempotency_records` | `id`, `user_id`, `idempotency_key`, `operation`, `request_hash`, `response_json`, `created_at` | Unique `(user_id, operation, idempotency_key)`; key reused với payload khác → 409 |
-| `lesson_results` | `id`, `learner_attempt_id`, `score`, `completed_at`, `result_json` | Unique attempt; kết thúc một lần |
-| `user_evidence` | `id`, `user_id`, `learner_attempt_id`, `evidence_id`, `collected_at` | Collection; unique `(learner_attempt_id, evidence_id)` |
-| `reward_transactions` | `id`, `user_id`, `learner_attempt_id`, `reward_type`, `amount`, `reason`, `created_at` | Unique event/cause key để không cấp trùng EXP/currency |
+| `idempotency_records` | `id`, `user_id`, `idempotency_key`, `operation`, `request_hash`, `response_json`, `http_status`, `created_at`, `expires_at` | Unique `(user_id, operation, idempotency_key)`; key reused với payload khác → 409. TASK-0012: `operation` ∈ `SUBMIT_ACTIVITY`/`COMPLETE_ATTEMPT`; `expires_at` = `created_at` + `app.learning.idempotency-ttl` (default 24h), expired → reclaim |
+| `lesson_results` | `id`, `learner_attempt_id`, `score`, `completed_at`, `result_json` | Unique attempt; kết thúc một lần. TASK-0012: ghi cùng transaction với flip `COMPLETED` |
+| `user_evidence` | `id`, `user_id`, `learner_attempt_id`, `evidence_id`, `snapshot_json`, `evidence_type`, `event_id`, `collected_at` | **TASK-0022 (V10)** — đọc/ghi bởi `GET /me/collection*`. `snapshot_json` (nullable JSONB, `CHECK jsonb_typeof='object'`) = bản embedded evidence node + lessonId/lessonTitle từ pinned version lúc collect; `evidence_type` VARCHAR(48) filter theo loại; `event_id` UUID → historical_events (live title). Unique `(learner_attempt_id, evidence_id)` (V4) + `ux_user_evidence_user_evidence (user_id, evidence_id)` (V10, cross-attempt dedup); `idx_user_evidence_user_event` cho event filter |
+| `reward_transactions` | `id`, `user_id`, `learner_attempt_id`, `reward_type`, `amount`, `reason`, `cause_key`, `created_at` | **TASK-0023** — ledger server-authoritative. Mỗi lần hoàn thành đầu tiên một logical lesson ghi 2 row (`EXP` 100 + `HISTORY_POINTS` 50, config `dauviet.rewards.*`) trong cùng transaction `complete()`. `cause_key` unique (`LESSON_FIRST_COMPLETE:{userId}:{lessonId}:{type}`) + `INSERT ON CONFLICT DO NOTHING` → idempotent, chặn double-grant cross-version/concurrent/backfill |
+| `map_locations` | `id`, `event_id`, `title`, `description`, `latitude`, `longitude`, `unlock_lesson_id`, `display_order`, `status`, `created_at`, `updated_at`, `row_version` | **TASK-0021 (V8)** — địa điểm trên bản đồ learner. `CHECK` lat `[-90,90]`, lng `[-180,180]`; `status` ∈ `DRAFT/PUBLISHED/ARCHIVED`; `row_version` optimistic lock. `unlock_lesson_id` nullable — null = luôn AVAILABLE |
+| `item_catalog` | `id`, `code` (unique), `name`, `description`, `category`, `item_type`, `rarity`, `asset_id`, `source_metadata` (JSONB), `active`, `row_version` | **TASK-0023 (V12)** — danh mục vật phẩm server-side. `item_type` ∈ `HISTORICAL_REPLICA/DIGITAL_EDITION/COMMEMORATIVE_BADGE`; `rarity` ∈ `COMMON/UNCOMMON/RARE/EPIC`; `category` ∈ `MO_HINH/PHIEN_BAN_SO/HUY_HIEU`. Mọi item là mô hình/phiên bản số/huy hiệu học tập — `source_metadata.note` ghi rõ "không phải hiện vật thật", không bịa provenance. Seed 8 item gắn mốc lịch sử nội dung đã publish |
+| `item_unlock_rule` | `id`, `item_id` → item_catalog, `rule_type`, `lesson_id`?, `threshold`?, `rule_version`, `revision`, `condition_json` JSONB?, `rule_metadata` JSONB?, `active` | **TASK-0023 (V12) + GAME-05 (V24/V25/V26/V27)** — v1: `rule_type` ∈ 3 loại cột phẳng, `chk_unlock_rule_shape` đòi `lesson_id`/`threshold` theo type; v2: `rule_type='RULE_V2'`, `rule_version=2`, `condition_json` = AST `leaf\|{all:[…]}\|{any:[…]}` (CHECK `jsonb_typeof='object'`, V25 mở rộng `chk_unlock_rule_type`/`chk_unlock_rule_shape` cho phép cột phẳng NULL khi `rule_version=2`); `rule_metadata.audit` ∈ `needs-mapping`/`valid-global` (V24 seed audit 7+1 item). V24 normalize rule v1 sang `condition_json` tương đương (giữ `rule_version=1`). **V27 tách schema khỏi thứ tự publish**: `rule_version` = SCHEMA payload (1=V1 flat — giữ `=1` để CHECK cũ và semantic "V1 legacy" không đổi; 2=V2 AST), `revision` (NOT NULL, DEFAULT 1, CHECK ≥1, backfill = `rule_version` cũ) = thứ tự publish per-item monotonic — cả API V1 lẫn V2 đều ghi `max(revision)+1`, không giảm/lặp trong cùng item; `user_inventory.unlock_rule_version` trace theo `revision`. Partial unique `WHERE active` = một active rule/item; rule append-only — rule mới deactivate rule cũ, không sửa lịch sử. `LEVEL_AT_LEAST` leaf parse được nhưng chưa đánh giá (GAME-07) |
+| `user_inventory` | `id`, `user_id` → users, `item_id` → item_catalog, `acquired_at`, `acquisition_source`, `source_lesson_id`?, `source_attempt_id`?, `unlock_rule_id`? → item_unlock_rule, `unlock_rule_version`?, `source_event_id`? → historical_events, `cause_key`? | **TASK-0023 (V12) + GAME-05 (V24)** — non-stackable, `UNIQUE (user_id, item_id)` + partial unique `ux_user_inventory_cause_key ON (cause_key)`; insert qua `insertIgnoreV2` (`ON CONFLICT DO NOTHING`) ghi đầy đủ provenance — rule đã cấp + `revision` (V27: `unlock_rule_version` giờ ghi `item_unlock_rule.revision`, không phải `rule_version`) + event nguồn + `cause_key = item-rule\|{ruleId}\|{userId}` (idempotent cross retry/re-evaluate). `acquisition_source` thêm `RULE_UNLOCK` (realtime v2) + `RECONCILE_GRANT` (reserved); giữ `ADMIN_GRANT` (reconcile V1 semantics — `itemsUnlocked` result screen loại nó). `source_attempt_id`/`source_lesson_id` = attempt/lesson **gây ra grant** (FINAL FIX-1: grant qua `evaluateAfterEventMilestone` cùng tx complete ghi đúng attempt vừa hoàn thành → `itemsUnlocked` result screen hiển thị được; reconcile giữ null — không gán attempt giả) |
+| `user_energy` | `user_id` (PK) → users, `current_energy`, `last_recovery_at`, `row_version` | **GAME-02 (V21)** — Thể lực server-authoritative; đúng một dòng/user, lazy-create `INSERT ON CONFLICT DO NOTHING` ở lần đầu cần energy. `CHECK current_energy BETWEEN 0 AND 100` (hard cap chung — giá trị `dauviet.energy.max-energy` luôn ≤ 100); `last_recovery_at` = anchor lazy-recovery (clock server), debit reset về `now` nên không tích lũy chu kỳ khi đầy. Serialize bằng `SELECT FOR UPDATE` + `@Version` optimistic phụ |
+| `energy_transactions` | `id`, `user_id` → users, `direction`, `amount`, `reason`, `cause_key`, `balance_after`, `reference_json` (JSONB), `created_at` | **GAME-02 (V21)** — ledger append-only. `direction` ∈ `CREDIT/DEBIT`; `reason` ∈ `GRADED_INCORRECT/NATURAL_RECOVERY/REFILL_PURCHASE/ADMIN_ADJUST`; `cause_key` UNIQUE — `SUBMIT_PENALTY:{attemptId}:{activityId}:{attemptNo}` cho penalty, `RECOVERY:{userId}:{anchorEpochSec}` cho recovery — insert qua `ON CONFLICT DO NOTHING` (exactly-once). `balance_after` = số dư sau bút toán (`CHECK 0..100`); `reference_json` = `{attemptId, activityId, attemptNo}` cho penalty, null cho recovery — không lộ đáp án. Index `(user_id, created_at DESC)` cho truy vết |
+| `animation_templates` | `id`, `code` (unique), `name`, `renderer_code`, `renderer_version`, `schema_version`, `capabilities_json`, `default_config_json`, `enabled` | **V14** — bộ vẽ hoạt họa generic; `capabilities_json` quảng bá tương tác renderer hỗ trợ (không chứa nội dung sự kiện) |
+| `animation_scenes` | `id`, `template_id` → animation_templates, `event_id`? → historical_events, `title`, `draft_json`, `status`, `current_version_id`, `row_version` | **V14** — cảnh hoạt họa data-driven; `draft_json` JSONB mutable; `status ∈ DRAFT/PUBLISHED/ARCHIVED`; `current_version_id` composite FK `(current_version_id, id)` → `animation_scene_versions(id, scene_id)` — phiên bản hiện hành phải thuộc cùng scene |
+| `animation_scene_versions` | `id`, `scene_id` → animation_scenes, `version_no`, `schema_version`, `renderer_code`, `renderer_version`, `snapshot_json`, `manifest_checksum` VARCHAR(64), `published_at`, `published_by` → users | **V14** — immutable (trigger `trg_animation_scene_versions_immutable` chặn UPDATE/DELETE, mirror V3); unique `(scene_id, version_no)` + `(id, scene_id)`; `manifest_checksum` = SHA-256 canonical `snapshot_json::text` (manifest + asset metadata nhúng — thứ learner nhận). **V18** đổi CHAR(64)→VARCHAR(64) để khớp JPA `length=64` (Hibernate `ddl-auto: validate` báo bpchar ≠ varchar khi boot) |
+| `animation_scene_asset_refs` | `scene_version_id` → animation_scene_versions, `asset_id` → assets, `role` | **V14** — ghi asset refs tại publish (`role ∈ BACKGROUND/OBJECT/THUMBNAIL/AUDIO/OVERLAY`); index `(asset_id)` cho ASSET_IN_USE retirement scan. "In use" = tham chiếu bởi BẤT KỲ version đã publish nào (không chỉ current) — version bất biến nên ref không bao giờ dọn |
+| `animation_scene_html` | `scene_id` → animation_scenes (unique), `html` TEXT, `filename`, `size_bytes`, `sha256` CHAR(64), `updated_at` | **V19** — HTML draft của scene `HTML_WEBVIEW`; bytes nằm ở đây, KHÔNG trong `draft_json` (draft chỉ mang metadata `html{filename,sizeBytes,sha256}`). Một scene nhiều nhất một draft |
+| `animation_scene_version_html` | `scene_version_id` → animation_scene_versions (unique), `html` TEXT, `filename`, `size_bytes`, `sha256` CHAR(64), `published_at` | **V19** — HTML bytes theo version đã publish; immutable (trigger `trg_animation_scene_version_html_immutable` mirror V14); publish copy draft→version trong cùng TX; learner fetch đọc từ đây |
+| `event_completion_policies` | `id`, `event_id` → historical_events, `policy_version`, `status`, `required_lesson_ids` JSONB, `optional_lesson_ids` JSONB, `mastery_threshold` SMALLINT, `published_at`, `created_at` | **V22** — policy có version cho mỗi event; `status` ∈ `DRAFT/PUBLISHED/ARCHIVED`; `UNIQUE (event_id, policy_version)` + partial unique index `ux_event_policy_published ON (event_id) WHERE status='PUBLISHED'` (tối đa 1 PUBLISHED/event); `mastery_threshold` NULL hoặc `BETWEEN 0 AND 100` (null = event không xét mastered); `required_lesson_ids`/`optional_lesson_ids` CHECK `jsonb_typeof='array'`; PUBLISHED immutable (lesson set + threshold đóng băng — thay đổi = `policy_version+1`) |
+| `user_event_progress` | `user_id` → users, `event_id` → historical_events, `milestone`, `policy_version`, `required_snapshot` JSONB, `granted_at` | **V22** — ledger append-only, PK `(user_id, event_id, milestone)`; `milestone` ∈ `EVENT_COMPLETED/EVENT_MASTERED`; `required_snapshot` lưu danh sách required tại thời điểm ghi (audit khi admin đổi policy — entitlement không thu hồi); insert qua `insertIgnore` (idempotent); không ghi MASTERED trước COMPLETED |
+| `historical_dossiers` | `id`, `canonical_code` UNIQUE, `dossier_type`, `title`, `summary`, `description`, `source_json` JSONB, `asset_id`? → assets, `status`, `dossier_version`, `row_version`, `created_by` → users, `created_at`, `updated_at` | **V22 + V28** — catalog canonical hồ sơ nhân vật/địa điểm/hiện vật/bối cảnh (Lớp B). `dossier_type` ∈ `PERSON/LOCATION/ARTIFACT/CONTEXT`; `status` ∈ `DRAFT/PUBLISHED/ARCHIVED`; `source_json` CHECK `jsonb_typeof='object'` (citation + asset pin — archive asset không mất nội dung đã mở); `canonical_code` là khóa dedup toàn cục; `dossier_version` tăng **mỗi lần publish** (GAME-06: sửa nội dung trên PUBLISHED chỉ là `pendingChanges`, publish mới ra version mới); `row_version` (V28, NOT NULL DEFAULT 0) optimistic lock cho `PUT /admin/dossiers/{id}` (`expectedRowVersion` → 409) |
+| `historical_dossier_versions` | `id`, `dossier_id` → historical_dossiers, `dossier_version`, `dossier_type`, `title`, `summary`, `description`, `source_json` JSONB, `asset_id`, `status`, `published_at`, `published_by` → users | **V28 (GAME-06)** — append-only snapshot nội dung mỗi lần publish; `UNIQUE (dossier_id, dossier_version)`; `status` CHECK `IN ('PUBLISHED','ARCHIVED')`; `source_json` CHECK `jsonb_typeof='object'`. `user_dossier_unlocks.dossier_version` pin nội dung admin đã duyệt lúc grant — doc-side truy vết được đúng version learner sở hữu. V28 backfill snapshot cho dossier PUBLISHED có sẵn từ V22 (idempotent `NOT EXISTS`) |
+| `event_dossiers` | `event_id` → historical_events, `dossier_id` → historical_dossiers, `unlock_on`, `sort_order` | **V22** — quan hệ n-n chính thức duy nhất sinh unlock (không so khớp tên/tag). PK `(event_id, dossier_id)`; `unlock_on` ∈ `EVENT_COMPLETED` (CHECK); index `(dossier_id)` cho reverse lookup |
+| `user_dossier_unlocks` | `user_id` → users, `dossier_id` → historical_dossiers, `event_id` → historical_events (nguồn mở đầu tiên), `dossier_version`, `granted_at` | **V22** — quyền mở hồ sơ, PK `(user_id, dossier_id)` (canonical dedup — một dossier không sở hữu 2 lần kể cả khi link nhiều event); `event_id` + `dossier_version` giữ provenance lần mở đầu tiên; `insertIgnore` idempotent; insert >0 = mở mới (trả cho cue `newlyUnlockedDossiers`) |
+| `learning_path_versions` | `id`, `path_code`, `version_no`, `title`, `description`, `status`, `published_at`, `created_at`, `updated_at` | **V33 (PATH-01)** — phiên bản lộ trình học tập duy nhất (`HISTORY_MAIN`); `status` ∈ `DRAFT/PUBLISHED/ARCHIVED`; partial unique index `ux_learning_path_active_published` đảm bảo tối đa 1 version PUBLISHED/path_code; trigger bảo vệ tính bất biến |
+| `learning_path_chapters` | `id`, `path_version_id` → learning_path_versions, `code`, `title`, `description`, `start_year`, `end_year`, `period_label`, `sort_order`, `theme_key` | **V33 (PATH-01)** — chương/thời kỳ lịch sử; `sort_order` xác định thứ tự; `theme_key` metadata định hình artwork; `CHECK start_year <= end_year` |
+| `learning_path_event_nodes` | `id`, `chapter_id`, `path_version_id`, `event_id` → historical_events, `sort_order`, `created_at` | **V33 (PATH-01)** — sự kiện trong chương; Unique `(path_version_id, event_id)` ngăn trùng sự kiện trong cùng version lộ trình |
+| `learning_path_lesson_nodes` | `id`, `event_node_id`, `event_id`, `lesson_id` → lessons, `sort_order`, `created_at` | **V33 (PATH-01)** — thứ tự bài học trong sự kiện; Composite FK `(event_id, lesson_id)` đảm bảo bài học thuộc đúng sự kiện ở tầng DB; Unique `(event_node_id, lesson_id)` |
+| `energy_policy_settings` | `id` (singleton=1), `enabled`, `max_energy`, `incorrect_penalty`, `recovery_amount`, `recovery_interval_seconds`, `row_version`, `updated_at` | **V49 (GAME-07, Issue #28)** — cấu hình runtime hệ Thể lực đọc mỗi request (không cache → admin PUT có hiệu lực ngay). `id` CHECK `=1` (singleton); `max_energy` CHECK `1..100` (khớp hard-cap `user_energy`/`energy_transactions.balance_after` V21); `recovery_interval_seconds` CHECK `60..86400` (1 phút..24h). Seed mặc định `(1,true,100,10,5,900)` khớp `dauviet.energy.*` props cũ |
+| `energy_remedies` | `id` UUID PK, `code` UNIQUE, `title`, `description`, `rarity`, `icon_key`, `asset_id`? → assets, `energy_gain`, `points_cost`, `cooldown_seconds`, `active`, `sort_order`, `row_version` | **V49 (GAME-07, Issue #28)** — catalog vật phẩm Viện Thái Y (Phương án B). `code` immutable (trace key trong `energy_transactions.reference_json->>'remedyCode'` — cooldown tra cứu qua đây); `rarity` CHECK `COMMON/UNCOMMON/RARE/EPIC`; `cooldown_seconds` 0=không giới hạn. Seed 4 row Phương án B: `NUOC_VOI` +20⚡/0đ/24h/COMMON, `TRA_SEN` +30⚡/30đ/4h/UNCOMMON, `NAM_LINH_CHI` +50⚡/55đ/12h/RARE, `SAM_NGOC_LINH` +100⚡/90đ/24h/EPIC — UUIDs `e7e00000-...-0001..0004` idempotent |
+
+### Bổ sung V14+V15 — Animation Engine
+
+- Manifest là JSONB whitelist (`AnimationManifestSchema.TOP_LEVEL_KEYS`); `animation_scenes.draft_json` mutable, `animation_scene_versions.snapshot_json` = manifest + asset metadata nhúng tại publish (edit asset sau đó không retro-đổi version).
+- Publish: `SELECT FOR UPDATE` trên `animation_scenes` (pessimistic lock) → `AnimationManifestValidator` → `version_no = max+1` → insert version + asset refs → xoay `current_version_id` + `status=PUBLISHED` trong một transaction; concurrent publish serialize, unique backstop.
+- `published_by` NOT NULL → V15 bootstrap system user `00000000-0000-4000-8000-000000000001` (`DISABLED`, password sentinel `!locked!` — không thể đăng nhập). `event_id` NULL vì không seed `historical_events`.
+- V15 seed idempotent (`ON CONFLICT DO NOTHING`): 2 templates (`RIVER_TIDE`, `JOURNEY_MAP`) + 3 scenes (`bach_dang_938_tide`, `hai_ba_trung_40`, `ly_thai_to_1010` — title VN) kèm version v1 + checksum `encode(digest(snapshot_text,'sha256'),'hex')`.
+- V16 (`V16__animation_cinematic_demos.sql`, idempotent): seed 3 scene v2 schemaVersion=2 (`bach_dang_938_cinematic` RIVER_TIDE + `hai_ba_trung_40_cinematic`, `ly_thai_to_1010_cinematic` JOURNEY_MAP) với `camera`/`tracks`/`effects`/`audio`/`environment` demo + 1 asset audio fixture `d7a60000-0000-4000-8000-000000000001` (silence.wav 46B, storage `{dauviet.assets.dir}/{id}.wav`). `schema_version=2` trên version rows; checksum recipe giữ nguyên. V1 scenes của V15 không đụng (published immutable).
+- V19 (`V19__html_webview_animation.sql`, idempotent): seed template `html-webview` (`renderer_code=HTML_WEBVIEW`, `renderer_version=1`, `schema_version=2`, enabled). `AnimationManifestValidator` có nhánh riêng cho `HTML_WEBVIEW` — chỉ validate metadata `html{}` + disclaimer, bỏ qua steps/assets/objects/river/map. Hướng dẫn soạn file: `docs/HTML_ANIMATION_GUIDE.md`.
+- **§8 post-hardening**: `AnimationScenePublishService.publish` ghi `schema_version = manifest.path("schemaVersion").asInt(1)` — publish manifest v1 → `schema_version=1`, v2 → `2`. Trước fix này service dùng `CURRENT_SCHEMA_VERSION` (luôn = version mới nhất) → scene v1 publish xong bị gắn nhãn v2 sai. IT `AnimationScenePublishIT` cover cả hai chiều + v2-keys-v1-schema → 422.
 
 **Đề xuất:** Dùng `UUID` phía Java, `JSONB` cho `draft_json`, `snapshot_json`, `state_json` và các outputs. Dùng `CHECK`/enum mapping thống nhất cho status; index `(user_id, status)`, `(lesson_id, published_at)`, `(learner_attempt_id, activity_id)`.
+
+### Bổ sung V8 — `map_locations` (TASK-0021)
+
+- `unlock_lesson_id` ràng buộc **cùng event** bằng composite FK `(event_id, unlock_lesson_id) REFERENCES lessons(event_id, id)` — cần `ux_lessons_event_id UNIQUE (event_id, id)` trên `lessons`; cross-event link không thể tồn tại ở DB level.
+- Unlock rule (server-side, không lưu cột trạng thái): `EXISTS learner_attempts a JOIN lesson_versions v ON v.id = a.lesson_version_id WHERE a.user_id = :uid AND a.status='COMPLETED' AND v.lesson_id = unlock_lesson_id` — đếm trên **mọi** pinned version nên republish không reset.
+- Learner chỉ thấy `map_locations.status='PUBLISHED'` của `historical_events.status='PUBLISHED'` (join qua `event_id`).
+- Index: `(event_id, status, display_order)` cho admin list; `(unlock_lesson_id)` cho FK lookup.
+
+### Bổ sung V22 — Event completion & historical dossiers (GAME-04)
+
+- Năm bảng mới, không đụng bảng cũ; migration `V22__event_completion_dossiers.sql` idempotent (mọi seed `ON CONFLICT DO NOTHING`).
+- Seed resolve events **theo slug** (`bach-dang-938`, `hai-ba-trung-40`, `ly-thai-to-1010`) — không phụ thuộc UUID cố định, kể cả khi `EventSeedRunner` đã tạo row với UUID khác V20.
+- Policy seed `PUBLISHED` v1 cho mỗi event có ít nhất một lesson `PUBLISHED` (demo 1 required lesson/event — không phải quy tắc mặc định; service đọc thẳng từ bảng). `required_lesson_ids` snapshot đóng băng tại publish: admin thêm lesson mới không retro-sửa policy — phải publish `policy_version+1`.
+- `user_event_progress` là ledger append-only; milestone `EVENT_COMPLETED`/`EVENT_MASTERED` mỗi cái chỉ ghi một lần (PK + `insertIgnore`). Republish policy không revoke; `policy_version` + `required_snapshot` giữ audit.
+- `historical_dossiers.canonical_code` unique toàn cục — một nhân vật xuất hiện ở hai sự kiện vẫn chỉ một dossier. `source_json` giữ `{source:{title,author,citation,url,reliability}}`; seed chỉ ghi dossier có citation thật (ĐVSKTT, Bảo tàng LSQG, Ban quản lý di tích Mê Linh, Viện Hàn lâm KHXH&NV) — không bịa trích dẫn.
+- `user_dossier_unlocks` PK `(user_id, dossier_id)` — dossier link hai event không double-count ownership; `event_id` ghi nguồn mở **đầu tiên**, `dossier_version` giữ provenance khi nội dung sau bị sửa/archive.
+- Seed dossiers: 4 PERSON (Ngô Quyền, Trưng Trắc, Trưng Nhị, Lý Thái Tổ), 3 LOCATION (Sông Bạch Đằng, Mê Linh–Luy Lâu, Hoa Lư–Đại La), 1 ARTIFACT (Bãi cọc gỗ Bạch Đằng). Link: Bạch Đằng→3, Hai Bà Trưng→3, Lý Thái Tổ→2, `unlock_on='EVENT_COMPLETED'`.
+- Concurrency: `EventMilestoneRecorder.recordIfEarned` mở `pg_advisory_xact_lock(hashtextextended(userId|eventId))` trong cùng tx `doComplete` — serialize hai completion song song của hai required lesson cuối; loser của lock re-evaluate trên trạng thái winner đã commit, `insertIgnore` chặn duplicate.
+- Reconcile-on-read: `EventProgressQueryService.progressOf` gọi `recordIfEarned` khi thiếu `EVENT_COMPLETED` — completed attempts trước khi policy tồn tại được ghi milestone lần đọc đầu tiên (idempotent, cùng evaluator/recorder path).
+
+### Bổ sung V23 — Policy v2 seed audit (GAME-04 FIX)
+
+- Migration `V23__policy_v2_seed_audit.sql` audit lại policy v1 do V22 seed (V22 chọn required lesson bằng `ORDER BY created_at LIMIT 1` — tùy timing seed có thể thiếu lesson); **không sửa V22** đã áp dụng.
+- Mỗi event có ≥1 lesson `PUBLISHED`: nếu policy PUBLISHED hiện có `required_lesson_ids` ngắn hơn tập lesson PUBLISHED thực tế → ARCHIVE v1 đó, insert `policy_version=2` PUBLISHED với **toàn bộ** lesson PUBLISHED (deterministic, không theo created_at). Nếu event chưa có policy nào → insert v1 đủ bộ. Event không có lesson PUBLISHED → bỏ qua (không tạo PUBLISHED policy trống).
+- Không xóa milestone/unlock đã cấp — entitlement giữ nguyên; learner completed v1 được `earnedPolicyVersion=1` phân biệt với `policyVersion=2` hiện tại.
+- `user_dossier_unlocks.dossier_version` (đã có từ V22) giờ được API trả ra: `DossierDetailResponse.dossierVersion` = pinned entitlement version, `catalogVersion` = version catalog hiện tại — phân biệt khi admin sửa nội dung sau unlock.
+- Lazy reconcile trong `DossierService.list/detail` (qua `EventReconcileService`) — dossier list mở thẳng không qua progress endpoint vẫn grant milestone/unlock cho learner cũ (hoàn thành trước GAME-04); scoped theo `visibleEventIdsOf(userId)`, không quét toàn bộ.
+- Fan-out trong `EventMilestoneRecorder` chạy khi `completed || completedAlready` — dossier admin publish/link sau khi learner đã completed được cấp ở lần reconcile kế (không cần học lại).
+
+### Bổ sung V24+V25+V26 — Item Unlock Rule Engine V2 (GAME-05)
+
+- `item_unlock_rule`: +`rule_version` (1=V1 legacy cột phẳng / publish v2 đầu trên item cũ; **≥2 = policy revision per-item** — FIX-4: mỗi lần admin publish rule mới, revision = max(`rule_version` của item)+1 nên hai publish khác nhau luôn phân biệt được trong `user_inventory.unlock_rule_version`; V26 nới CHECK `rule_version >= 1` + v2 đòi `rule_version >= 2` thay vì `IN (1,2)`/`=2`), +`condition_json` JSONB (AST `leaf|{all:[…]}|{any:[…]}` — operator chỉ bọc leaf, depth ≤ 2), +`rule_metadata` JSONB (`audit ∈ needs-mapping|valid-global`). `chk_rule_v2_condition` đòi `condition_json` object khi `rule_version>1`. V24 normalize rule v1 sang `condition_json` tương đương (giữ `rule_version=1`).
+- V25 mở rộng `chk_unlock_rule_type` (thêm `RULE_V2` — discriminator hệ thống, không phải leaf type) + `chk_unlock_rule_shape` (v2 đòi `condition_json` NOT NULL + `lesson_id`/`threshold` NULL — v2 sống trong AST, cột phẳng chỉ phục vụ v1). V26 nới v2 branch `rule_version >= 2` (revision per-item).
+- `user_inventory`: +`unlock_rule_id`→item_unlock_rule, +`unlock_rule_version`, +`source_event_id`→historical_events, +`cause_key` TEXT + partial unique `ux_user_inventory_cause_key`. `acquisition_source` thêm `RULE_UNLOCK`/`RECONCILE_GRANT`; giữ `ADMIN_GRANT` cho reconcile (V1 compat — result screen `itemsUnlocked` loại `ADMIN_GRANT`).
+- Seed audit V24: 7 item event-themed (`PHIEN_BAN_SO_*`, `MO_HINH_*`, `HUY_HIEU_HAI_BA_TRUNG`) flag `needs-mapping` (V1 đếm global cho item event-specific → chặn grant mới tới khi admin publish rule v2 event-scoped minh định, không đoán eventId); `HUY_HIEU_DIEN_BIEN_PHU` flag `valid-global` (LESSON_COUNT không gắn event). Ownership đã cấp không đổi (EVT-05). **FIX-1**: `needs-mapping` là một quyết định dùng chung — `ItemUnlockRule.isNeedsMapping(metadata)` được đọc bởi grant path (`ItemUnlockService.blockedByAudit`) và catalog read path (`RewardService.requirement` → `status=UNCONFIGURED`, `satisfied=false`, không children — không fake satisfied của rule legacy).
+- Concurrency: `ItemUnlockService.evaluate` mở `pg_advisory_xact_lock(hashtextextended('item-unlock|'||userId))` trong tx submit/complete — lock order attempt (PESSIMISTIC_WRITE) → event milestone advisory (user,event) → item advisory (item-unlock|user) nhất quán, serialize hai submit/complete song song không bỏ lỡ grant qua ngưỡng.
+- Triggers: `evaluateAfterEvidenceCollected` (submit EVIDENCE_SELECT được chấp nhận), `evaluateAfterLessonCompletion` (doComplete — **sau** `eventMilestones.recordIfEarned`, ordering fix: leaf `EVENT_*` thấy milestone vừa ghi cùng tx), `evaluateAfterEventMilestone` (**FIX-3**: `EventMilestoneRecorder` gọi ngay khi milestone `EVENT_COMPLETED`/`EVENT_MASTERED` được ghi MỚI — reconcile-on-read/lazy reconcile cũng trigger item evaluation cùng tx; chỉ chạy khi milestone mới, không vòng lặp).
+- `ItemRuleEvaluationContext` lazy per-request cache (mọi leaf cùng rule/item dùng chung query) — không N+1 khi catalog evaluate nhiều rule.
+- `doComplete` ordering: `grantFirstCompletion` → `eventMilestones.recordIfEarned` (nếu eventId) → `itemUnlocks.evaluateAfterLessonCompletion` — GAME-04 ledger ghi trước, evaluator item đọc thấy ngay trong cùng tx.
+- **FIX-7 reconcile batch**: `ItemUnlockService.reconcileBatched` — keyset pagination `user_id > cursor` trên union `user_evidence`/`learner_attempts COMPLETED`/`user_event_progress`; `reconcileBatch` chạy `REQUIRES_NEW` mỗi trang (tx ngắn, không load toàn bộ ids), cùng evaluator + grant path realtime; `reconcileUnlocks()` giữ đường một-lần cho `?batchSize=0`.
+
+### Bổ sung V27 — Revision schema (GAME-05 FINAL FIX)
+
+- Migration `V27__item_rule_revision_schema.sql`: `item_unlock_rule` +`revision INTEGER`; backfill `revision = rule_version` (V1 → 1, các publish V2 đã lên 2/3/… từ FIX-4 giữ nguyên — không viết lại provenance cũ); `SET NOT NULL`, `SET DEFAULT 1` (chỉ bảo vệ insert thủ công — service luôn gán giá trị tường minh), `chk_rule_revision CHECK (revision >= 1)`. Không đụng V24/V25/V26.
+- Tách hai khái niệm từng dính trong `rule_version`: **schemaVersion** (`rule_version` — 1=V1 flat, 2=V2 AST, CHECK cũ giữ nguyên) vs **revision** (thứ tự publish per-item, `findMaxRevision(itemId)+1` cho cả nhánh API V1 lẫn V2). Trước đây luồng setRule V1 hardcode `ruleVersion=1` nên sau nhiều publish V2 một request V1 ghi revision trùng/giảm → provenance lẫn; V1=1 giờ chỉ nghĩa là "legacy V1 schema", không phải revision thấp nhất.
+- **FINAL FIX-1 (grant provenance)**: `EventMilestoneRecorder.recordIfEarned` qua overload 4-tham-số `(userId, eventId, lessonId, attemptId)` — `doComplete` truyền attempt đang hoàn thành xuống `evaluateAfterEventMilestone` → grant event-milestone trong cùng tx complete ghi `source_attempt_id`/`source_lesson_id` đúng → `itemsUnlocked` (lọc `source_attempt_id` + `acquisition_source<>'ADMIN_GRANT'`) hiển thị được badge. Overload 2-tham-số (reconcile-on-read/lazy reconcile) giữ `null` — không gán attempt giả.
+- **FINAL FIX-2 (item-scope guard)**: `ItemRuleScopeResolver` suy `ItemScope` ∈ `UNRESOLVED|EVENT_SCOPED|GLOBAL` từ **toàn bộ lịch sử rule** của item (flag `needs-mapping` + leaf event-scoped trong AST đã publish — không hard-code mã item, không đoán eventId). `AdminItemService.buildRule` từ chối (400) publish rule global lên item `UNRESOLVED`/`EVENT_SCOPED`; `ItemUnlockService.blockedByAudit` chặn grant khi scope `UNRESOLVED` kể cả khi active rule không còn flag; catalog `requirement` → `UNCONFIGURED`. Item GLOBAL giữ nguyên quyền nhận rule global.
+- **FINAL FIX-4 (collectible evidence)**: `ItemConditionValidator.isCollectible` — evidence chỉ được coi "collect được" khi một activity `EVIDENCE_SELECT` trong snapshot PUBLISHED **hiện tại** tham chiếu nó (qua `@> jsonb_build_array(to_jsonb(:eid))` trên `visibleEvidenceIds`/`acceptedEvidenceIds`/`requiredEvidenceIds` hoặc phần tử `evidenceOptions[{id}]`); chỉ nằm trong mảng `evidence[]` metadata là chưa đủ (không ai submit được). Fallback: đã có `user_evidence` row (collect hợp lệ từ version cũ — entitlement giữ nguyên).
+
+### Bổ sung V28 — `historical_dossier_versions` (GAME-06)
+
+- Migration `V28__historical_dossier_versions.sql`: `historical_dossiers` +`row_version BIGINT NOT NULL DEFAULT 0` (optimistic lock `expectedRowVersion` trên `PUT /admin/dossiers/{id}`); bảng `historical_dossier_versions` append-only snapshot nội dung mỗi lần publish — `UNIQUE (dossier_id, dossier_version)`, `status` CHECK `IN ('PUBLISHED','ARCHIVED')` (không có DRAFT — snapshot chỉ ghi khi publish/archive), `source_json` CHECK `jsonb_typeof='object'`, `published_by` → users. Backfill snapshot cho dossier PUBLISHED có sẵn (idempotent `NOT EXISTS`). Không đụng V22–V27.
+- `historical_dossiers.dossier_version` giờ tăng **mỗi lần publish** (`maxVersion+1`); sửa nội dung trên row PUBLISHED chỉ đặt `pendingChanges` — learner đã unlock vẫn đọc nội dung pinned qua `user_dossier_unlocks.dossier_version` trỏ `historical_dossier_versions`.
+- `event_completion_policies` mutability (GAME-06): `PUT /{policyId}` sửa **in-place trên row DRAFT** (policyId ổn định — user override thay copy-on-write; guard `status='DRAFT'` ở service, PUBLISHED immutable giữ nguyên). Publish atomic: lock event `FOR UPDATE` → revalidate → archive PUBLISHED cũ **`saveAndFlush` trước** khi ghi PUBLISHED mới (tránh va partial unique `ux_event_policy_published` khi flush defer) → `published_at`.
+- `event_dossiers` replace semantics (GAME-06): `PUT /admin/events/{eventId}/dossiers` xoá + insert nguyên list trong một tx — mọi `dossierId` phải PUBLISHED (422 khi DRAFT/ARCHIVED/missing), `displayOrder` (map `sort_order`) `>=0` và không trùng dossierId; grant learner theo lazy reconcile — không fan-out khi admin đổi link.
+- `item_unlock_rule` append-only phục vụ `GET /admin/items/{itemId}/rule/history` — `grantCount` từ `user_inventory.unlock_rule_id`; không cần schema mới.
+
+### Bổ sung V31 — Learning Streak (STREAK-01)
+
+- Migration `V31__learning_streak.sql`: hai bảng phục vụ "Chuỗi Ngày Học — Ngọn Lửa Hào Khí". `study_date` luôn là ngày theo `Asia/Ho_Chi_Minh` chuyển từ `learner_attempts.completed_at` (UTC) — server-side, không bao giờ tin client.
+
+**`user_learning_streaks`** — 1 dòng/user, lazy-create lần complete đầu tiên:
+| Column | Type | Notes |
+|---|---|---|
+| user_id | UUID PK → users.id | |
+| current_streak | INTEGER NOT NULL ≥0 | reset về 1 khi bỏ 1 ngày VN |
+| longest_streak | INTEGER NOT NULL ≥0 | kỷ lục, không bao giờ giảm; CHECK longest ≥ current |
+| last_qualified_date | DATE | ngày VN gần nhất có attempt COMPLETED |
+| created_at, updated_at | TIMESTAMPTZ | |
+| row_version | BIGINT | optimistic lock phụ |
+
+**`user_learning_streak_days`** — append-only ledger (ground truth), PK `(user_id, study_date)`:
+| Column | Type | Notes |
+|---|---|---|
+| user_id | UUID → users.id | |
+| study_date | DATE | `(completed_at AT TIME ZONE 'Asia/Ho_Chi_Minh')::date` |
+| lesson_id | UUID → lessons.id | bài của attempt thắng race |
+| learner_attempt_id | UUID → learner_attempts.id | attempt đầu tiên của ngày |
+| completed_at | TIMESTAMPTZ | server-time của attempt thắng race |
+| created_at | TIMESTAMPTZ | |
+
+- Idempotency 3 lớp: (1) `doComplete` chỉ gọi khi attempt flip IN_PROGRESS→COMPLETED lần đầu; (2) `UNIQUE(user_id, study_date)` trên ledger chặn concurrent duplicate — `INSERT ON CONFLICT DO NOTHING` trả 0 → no-op; (3) `UserLearningStreak.advanceTo()` no-op khi `newDate == lastQualifiedDate`.
+- Ghi serialize qua `PESSIMISTIC_WRITE` trên `user_learning_streaks` (cùng pattern EnergyService); lock-order sau `learner_attempts` — `doComplete` đã lock attempt trước.
+- Đọc API (`stateOf`, `calendarOf`) `readOnly=true` KHÔNG lazy-create — user chưa học trả bộ default (current=0) chứ không ghi DB.
+- Backfill: standalone `dau-viet-db/scripts/backfill-learning-streak.sql` (không phải migration) — `\if :{?dry_run}` mặc định dry-run ROLLBACK; DISTINCT ON earliest attempt per (user, study_date); gaps-and-islands streak calc; upsert `GREATEST/CASE` bảo toàn ghi song song mới hơn.
 
 ## 4. Contract snapshot bài học
 
@@ -171,12 +293,94 @@ CREATE TABLE activity_attempts (
 
 `row_version` dùng với JPA `@Version` hoặc lock phù hợp khi concurrent submit. Migration tiếp theo bổ sung `evidences`, `assets`, collection, idempotency và reward ledger. Không sửa migration đã áp dụng trong môi trường shared.
 
+**Trạng thái áp dụng (2026-10-15):** schema thực tế trong `dau-viet-backend/src/main/resources/db/migration/` hiện gồm V1 (`historical_events`), V2 (`users`, `auth_refresh_tokens`), V3 (`assets`, `evidences`, `lesson_templates`, `lessons`, `lesson_versions` + trigger immutable), V4 (`learner_attempts`, `activity_attempts`, `idempotency_records`, `lesson_results`, `user_evidence`, `reward_transactions`), V5 (`historical_events.row_version`), V6 (`evidences.row_version` cho optimistic locking phía admin). Nguồn đề xuất: `dau-viet-db/` (xem README của nó cho các quyết định mô hình và giới hạn validation phía service).
+
+**Legacy upgrade path cho V10 (TASK-0022):** `db/migration/beforeEachMigrate.sql` là SQL callback chạy trước mọi versioned migration. Khi `ux_user_evidence_user_evidence` chưa tồn tại (DB legacy từ V4–V9 có duplicate `(user_id, evidence_id)`), callback archive toàn bộ non-canonical rows vào `user_evidence_legacy_archive` (bảng bền vững, PK `id`, giữ `canonical_id` trỏ row được giữ lại = `MIN(collected_at, id)`), rồi xoá duplicates khỏi bảng active để `CREATE UNIQUE INDEX` của V10 pass. DB sạch/đã upgrade → guard `to_regclass` thoát sớm, no-op. Archive **không bao giờ** bị drop — lịch sử collect gốc truy vấn được. V11 giữ nguyên như safety net (chỉ chạy khi còn duplicates sót — thực tế không xảy ra sau callback).
+
+### Contract `draft_json` v1 (TASK-0009)
+
+```json
+{
+  "schemaVersion": 1,
+  "stages": [
+    {
+      "id": "stage-context",
+      "type": "CONTEXT",
+      "title": "Bối cảnh",
+      "required": true,
+      "activities": [
+        {
+          "id": "act-intro",
+          "type": "READ",
+          "required": true,
+          "instruction": "Đọc bối cảnh",
+          "config": {"text": "..."},
+          "validation": {},
+          "feedback": {},
+          "evidenceRefs": ["<evidence-uuid>"]
+        }
+      ],
+      "nextStageIds": ["stage-evidence"],
+      "requiredEvidenceIds": []
+    }
+  ],
+  "completion": {
+    "requireAllRequiredStages": true,
+    "requiredStageIds": [],
+    "minScore": null
+  }
+}
+```
+
+- Top-level keys được phép: `schemaVersion`, `stages`, `completion`, `objectives` (mảng string, sync một chiều sang `lessons.objectives_json` khi save nếu có).
+- Stage `id`/`activity.id` theo `^[a-z0-9][a-z0-9-]{1,63}$`, unique trong draft; thứ tự = vị trí mảng (không cần cột `order`).
+- `nextStageIds` là đồ thị chuyển stage (nhiều nhánh được phép); validator DFS ba-màu chặn chu trình thật và target không tồn tại — đồ thị hội tụ (diamond, shared destination) KHÔNG bị coi là chu trình. Entry = `stages[0]`; publish yêu cầu terminal reachable từ entry.
+- 9 `StageType` × 12 `ActivityType` theo allow-map `STAGE_ALLOWED_ACTIVITIES` (READ ở mọi stage); chi tiết trong `docs/LEARNING_ENGINE_DESIGN.md` §2/§6.
+- `evidenceRefs`/`requiredEvidenceIds` lưu `evidences.id` dạng string UUID; publish-level check yêu cầu cùng `event_id` + status `DRAFT|APPROVED`.
+- Answer keys (`correctOptionIds`, `correctPairs`, `expectedOrder`, ...) tồn tại trong `config`/`validation` nhưng **server-only** — strip khi xuất learner payload (TASK-0010).
+
+### Contract `snapshot_json` (TASK-0010)
+
+Bản ghi bất biến được `POST /admin/lessons/{id}/publish` ghi vào `lesson_versions.snapshot_json`; là single published source of truth — admin sửa draft/evidence sau đó không ảnh hưởng version đã publish.
+
+```json
+{
+  "schemaVersion": 1,
+  "lessonId": "<uuid>",
+  "title": "...",
+  "centralQuestion": "...",
+  "objectives": ["..."],
+  "templateCode": "tpl-code",
+  "stages": [ /* verbatim từ draft — giữ server-only keys */ ],
+  "completion": { /* verbatim nếu có */ },
+  "evidence": [
+    {
+      "id": "<uuid>", "title": "...", "evidenceType": "...",
+      "description": "...",
+      "source": {"title": "...", "author": "...", "url": "...",
+                 "citation": "...", "publishedAt": "..."},
+      "reliability": "HIGH", "relevance": "...",
+      "assetId": "<uuid|null>"
+    }
+  ],
+  "assets": [
+    {"id": "<uuid>", "storageKey": "...", "mimeType": "...",
+     "sizeBytes": 0, "originalFilename": "...", "altText": "..."}
+  ]
+}
+```
+
+- `evidence[]` được embed **denormalized** từ bảng `evidences` tại thời điểm publish (id thu thập từ `config.visibleEvidenceIds/requiredEvidenceIds/visibleSourceIds`, `activity.evidenceRefs`, `stage.requiredEvidenceIds`); `assets[]` từ `evidence.assetId` + `config.imageAssetId`. Embed giữ cho quét `EVIDENCE_IN_USE` LIKE-based vẫn thấy id trong snapshot — trả lời câu hỏi mở §7.3: chọn embed đầy đủ learner-facing fields, không pin version.
+- Server-only keys (`correctOptionIds`, `validation`, stage `requiredEvidenceIds`...) **có trong snapshot** để phục vụ evaluation phía server; `LearnerProjectionService` strip khi đọc learner. Admin `GET /versions/{id}` thấy snapshot đầy đủ.
+- Immutability: trigger `trg_lesson_versions_immutable` chặn UPDATE/DELETE ở DB level — không phụ thuộc code phía app.
+
 ## 6. Invariants giao dịch
 
-- **Publish:** validate toàn snapshot → transaction insert version → cập nhật current version; attempt cũ không đổi version.
+- **Publish:** `SELECT FOR UPDATE` trên `lessons` (pessimistic lock) → PUBLISH-level `DraftValidator` → `version_no = max+1` → insert `lesson_versions` → cập nhật `current_version_id` + `status=PUBLISHED` — tất cả trong một transaction; attempt cũ không đổi version (đã implement TASK-0010).
 - **Start/resume:** ưu tiên resume attempt `IN_PROGRESS` đã có theo chính sách PO; tránh hai attempt active ngoài ý muốn bằng transaction/constraint phù hợp.
 - **Submit:** xác thực owner → check state/version/activity → lock/optimistic concurrency → evaluate server-side → append activity attempt → update cursor/state → commit.
-- **Complete/reward:** ghi result và reward ledger trong cùng transaction; `UNIQUE` guard + idempotency key giúp không trao thưởng trùng.
+- **Complete:** ghi `lesson_results` trong cùng transaction với flip `COMPLETED` (đã implement TASK-0012); `UNIQUE` per attempt + idempotent `alreadyCompleted`.
+- **Reward (mục tiêu bất biến, chưa implement):** khi có grant logic, phải ghi reward ledger trong cùng transaction với complete; `UNIQUE` guard + idempotency key giúp không trao thưởng trùng. Hiện `complete()` **không** ghi `reward_transactions`.
 - **Archive:** ngăn attempt mới trên nội dung archived, giữ bản cũ cho attempt đang học (cần chốt chính sách).
 - **Deletion:** soft delete/retire media còn được publish tham chiếu.
 
@@ -194,3 +398,39 @@ CREATE TABLE activity_attempts (
 - `Dau_Viet_BA_MVP_Learning_Framework.docx`: mục 2–8, đặc biệt Event ≠ Lesson, schema Stage/Activity, requirement ENG-01…10, versioning, publish.
 - `Functional_Requirements_Dau_Viet_MVP.docx`: FR-01…46; tiến độ, collection, map và interaction.
 - Tài liệu này là **technical proposal**, không tự tuyên bố tất cả những lựa chọn schema là yêu cầu BA đã duyệt.
+
+
+### Bổ sung V39–V43 — Learning Path Hierarchy, Per-Period Progression & Heritage Locations V2
+
+- **`V39__learning_path_hierarchy.sql`**:
+  - `learning_path_chapters`: thêm `parent_id UUID REFERENCES learning_path_chapters(id) ON DELETE RESTRICT`, `node_type VARCHAR(16) NOT NULL DEFAULT 'PERIOD' CHECK (node_type IN ('ERA','PERIOD','PHASE'))`, `chk_chapter_no_self_parent CHECK (parent_id IS NULL OR parent_id <> id)`.
+  - `historical_events`: thêm `end_year INTEGER`, `date_precision VARCHAR(16) NOT NULL DEFAULT 'EXACT' CHECK (date_precision IN ('EXACT','CIRCA','CENTURY','PERIOD'))`, `chk_event_year_range CHECK (end_year IS NULL OR start_year IS NULL OR start_year <= end_year)`.
+- **`V40__heritage_locations.sql`**:
+  - `map_locations`: gỡ `fk_map_location_unlock_lesson_same_event`, cho phép `event_id` NULL, thêm `slug VARCHAR(120) UNIQUE`, `kind VARCHAR(32) NOT NULL DEFAULT 'HERITAGE_SITE'`, `coordinate_precision VARCHAR(24) NOT NULL DEFAULT 'EXACT'`, `visibility VARCHAR(24) NOT NULL DEFAULT 'ALWAYS_VISIBLE'`, `unlock_rule_mode VARCHAR(16) NOT NULL DEFAULT 'ANY'`, `cover_asset_id UUID REFERENCES assets(id)`, `short_summary VARCHAR(500)`.
+  - `map_location_events (location_id, event_id, role, sort_order)`: liên kết N–N giữa địa điểm và sự kiện; backfill từ `map_locations.event_id`.
+  - `map_location_unlock_lessons (location_id, lesson_id)`: danh sách bài học mở khóa địa điểm (hỗ trợ `ANY` / `ALL` xuyên sự kiện); backfill từ `map_locations.unlock_lesson_id`.
+  - `map_location_media (id, location_id, media_type, title, caption, asset_id, external_url, visibility, sort_order)`: tư liệu đa phương tiện (`IMAGE_2D`, `PANORAMA_360`, `AUDIO_GUIDE`, `DOCUMENTARY_CLIP`), `visibility ∈ ('PUBLIC_PREVIEW', 'UNLOCKED_ONLY')`.
+  - `user_location_unlocks (user_id, location_id, source_lesson_id, source_attempt_id, unlocked_at)`: ledger append-only lưu vết mở khóa địa điểm.
+- **`V41__user_path_period_state.sql`**:
+  - `user_path_period_state (user_id, path_code, period_chapter_id, last_touched_at)`: lưu thời kỳ người học tương tác gần nhất để phục vụ `lastPeriodCode` và con trỏ `current` theo từng thời kỳ.
+- **`V42__seed_history_main_v2.sql`**:
+  - Archive `HISTORY_MAIN` v1 và phát hành `HISTORY_MAIN` v2 (`PUBLISHED`) với cây `ERA -> PERIOD -> EVENT -> LESSON`, nâng các sự kiện có policy hợp lệ lên `REQUIRED` và gắn đầy đủ các bài học `PUBLISHED`.
+- **`V43__seed_heritage_location_assets_and_media.sql`**:
+  - Đồng bộ 6 tranh minh họa di sản vào bảng `assets`, backfill `slug`, `kind`, `short_summary`, `cover_asset_id`, `coordinate_precision`, `visibility`, `unlock_rule_mode` cho 12 địa điểm di tích canonical và gắn `map_location_media` chuẩn.
+
+### Chính sách Deprecated và Thời điểm gỡ cột `map_locations.event_id`, `unlock_lesson_id` (ADR-009 / Issue #26)
+
+1. **Nguồn chân lý hiện hành (Canonical Source of Truth)**:
+   - Liên kết sự kiện của địa điểm: bảng `map_location_events (location_id, event_id, role, sort_order)`.
+   - Luật bài học mở khóa địa điểm: cột `map_locations.unlock_rule_mode ∈ ('NONE', 'ANY', 'ALL')` kết hợp bảng `map_location_unlock_lessons (location_id, lesson_id)`.
+2. **Lý do giữ tạm trong giai đoạn chuyển tiếp (Phase 1 — Compatibility Window)**:
+   - Tương thích ngược với endpoint Admin v1 `/api/v1/admin/events/{eventId}/map-locations` (`AdminMapLocationService` ghi đồng thời vào cột cũ và đồng bộ xuống hai bảng nối qua `syncLegacyJoinTables`).
+   - Tương thích ngược với các integration test cũ (`MapLocationIT`) chèn trực tiếp vào bảng `map_locations`.
+   - Tuân thủ mô hình migration không gián đoạn (Expand-and-Contract): mở rộng schema và backfill ở V40/V43 trước khi thực thi migration thu hẹp (`DROP COLUMN`).
+3. **Quyết định thời điểm và 4 điều kiện gỡ bỏ cột (Phase 2 — Contract Migration)**:
+   - **Thời điểm thực thi**: Tại bản phát hành dọn dẹp kỹ thuật ngay sau khi đóng Epic E và Epic F (Milestone M4 Cleanup).
+   - **Bốn điều kiện tiên quyết bắt buộc trước khi chạy `ALTER TABLE map_locations DROP COLUMN event_id, DROP COLUMN unlock_lesson_id`**:
+     - **Gate 1 (Client Cutover)**: Toàn bộ nhánh Mobile (`#24`, `#25`) và Admin (`#19`, `#20`) đã hợp nhất vào `main` và chỉ tiêu thụ `eventIds[]`, `events[]`, `unlockMode`, `unlockLessons[]`.
+     - **Gate 2 (Legacy Endpoint Sunset)**: Ngừng hỗ trợ hoặc chuyển hoàn toàn `AdminMapLocationController` (`/api/v1/admin/events/{eventId}/map-locations`) sang thao tác thuần trên `map_location_events` và `map_location_unlock_lessons`.
+     - **Gate 3 (Test Fixture Cutover)**: Cập nhật `MapLocationIT` để khởi tạo dữ liệu qua `map_location_events` và `map_location_unlock_lessons`.
+     - **Gate 4 (Zero-Orphan Data Audit)**: Kiểm toán dữ liệu trên DB xác nhận bằng `0` số bản ghi có `event_id` hoặc `unlock_lesson_id` khác `NULL` nhưng thiếu dòng tương ứng trong `map_location_events` / `map_location_unlock_lessons`.

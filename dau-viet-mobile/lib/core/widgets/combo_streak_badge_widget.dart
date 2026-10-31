@@ -3,9 +3,10 @@ import '../audio/dau_viet_audio_service.dart';
 import '../theme/dau_viet_colors.dart';
 import '../theme/dau_viet_typography.dart';
 
-/// Widget biểu tượng Ngọn Lửa Hào Khí (Combo Streak Badge) chuẩn Duolingo
-/// Hiển thị chuỗi câu đúng liên tiếp kèm hệ số nhân điểm Sử Ký (x1.5, x2.0).
-/// Tích hợp hiệu ứng thở phập phồng (subtle flame pulse) và âm thanh tương tác.
+/// Widget biểu tượng chuỗi câu trả lời đúng liên tiếp TRONG MỘT BÀI (answer
+/// combo) — KHÁC với Chuỗi Ngày Học (daily streak, xem streakProvider).
+/// `multiplier` chỉ là nhãn hiển thị: Reward Engine KHÔNG có hệ số nhân
+/// Điểm Sử Ký/EXP, nên các màn không được truyền giá trị > 1.0.
 class ComboStreakBadgeWidget extends StatefulWidget {
   final int streakCount;
   final double multiplier;
@@ -39,18 +40,24 @@ class _ComboStreakBadgeWidgetState extends State<ComboStreakBadgeWidget>
 
     _scaleAnimation = TweenSequence<double>([
       TweenSequenceItem(
-        tween: Tween<double>(begin: 1.0, end: 1.08)
-            .chain(CurveTween(curve: Curves.easeInOut)),
+        tween: Tween<double>(
+          begin: 1.0,
+          end: 1.08,
+        ).chain(CurveTween(curve: Curves.easeInOut)),
         weight: 50,
       ),
       TweenSequenceItem(
-        tween: Tween<double>(begin: 1.08, end: 1.0)
-            .chain(CurveTween(curve: Curves.easeInOut)),
+        tween: Tween<double>(
+          begin: 1.08,
+          end: 1.0,
+        ).chain(CurveTween(curve: Curves.easeInOut)),
         weight: 50,
       ),
     ]).animate(_pulseController);
 
-    if (widget.isActive && widget.streakCount >= 2 && !DauVietAudioService.isTestEnvironment) {
+    if (widget.isActive &&
+        widget.streakCount >= 2 &&
+        !DauVietAudioService.isTestEnvironment) {
       _pulseController.repeat();
     }
   }
@@ -58,7 +65,9 @@ class _ComboStreakBadgeWidgetState extends State<ComboStreakBadgeWidget>
   @override
   void didUpdateWidget(covariant ComboStreakBadgeWidget oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (widget.isActive && widget.streakCount >= 2 && !DauVietAudioService.isTestEnvironment) {
+    if (widget.isActive &&
+        widget.streakCount >= 2 &&
+        !DauVietAudioService.isTestEnvironment) {
       if (!_pulseController.isAnimating) {
         _pulseController.repeat();
       }
@@ -121,9 +130,10 @@ class _ComboStreakBadgeWidgetState extends State<ComboStreakBadgeWidget>
             ),
             const SizedBox(height: 8),
             Text(
-              widget.multiplier > 1.0
-                  ? 'Tuyệt đỉnh! Hệ số nhân thưởng hiện tại là x${widget.multiplier.toStringAsFixed(1)} cho tất cả Dấu Vết và Điểm Sử Ký.'
-                  : 'Hãy trả lời đúng từ 3 câu liên tiếp để kích hoạt hệ số nhân thưởng hào khí x1.5 và x2.0!',
+              // Đây là chuỗi câu đúng TRONG BÀI (answer combo) — khác Chuỗi
+              // Ngày Học. Không nhắc hệ số nhân: Reward Engine không có cơ
+              // chế x1.5/x2 cho Điểm Sử Ký.
+              'Đây là chuỗi câu đúng liên tiếp trong bài — khác với Chuỗi Ngày Học trên màn chính.',
               style: DauVietTypography.bodyMedium.copyWith(
                 color: DauVietColors.inkMuted,
                 height: 1.4,
@@ -172,7 +182,9 @@ class _ComboStreakBadgeWidgetState extends State<ComboStreakBadgeWidget>
             border: Border.all(
               color: isHighCombo
                   ? const Color(0xFFFF9800)
-                  : (hasFlame ? DauVietColors.imperialGold : DauVietColors.outlineVariant),
+                  : (hasFlame
+                        ? DauVietColors.imperialGold
+                        : DauVietColors.outlineVariant),
               width: isHighCombo ? 1.6 : 1.2,
             ),
             boxShadow: isHighCombo
@@ -224,13 +236,13 @@ class _ComboStreakBadgeWidgetState extends State<ComboStreakBadgeWidget>
               if (widget.multiplier > 1.0) ...[
                 const SizedBox(width: 5),
                 Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1.5),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 5,
+                    vertical: 1.5,
+                  ),
                   decoration: BoxDecoration(
                     gradient: const LinearGradient(
-                      colors: [
-                        DauVietColors.imperialGold,
-                        Color(0xFFE65100),
-                      ],
+                      colors: [DauVietColors.imperialGold, Color(0xFFE65100)],
                     ),
                     borderRadius: BorderRadius.circular(10),
                   ),

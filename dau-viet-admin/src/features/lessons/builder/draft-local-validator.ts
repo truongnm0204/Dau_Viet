@@ -1,0 +1,501 @@
+import type { Activity, Draft, Stage } from "./draft-model";
+
+/**
+ * Lỗi client-side giống backend FieldError — đủ để chặn submit sớm và
+ * hiển thị vị trí cụ thể. Không thay thế validate server (evidence/asset
+ * existence vẫn cần DB) nhưng bắt được các lỗi cấu hình phổ biến trước khi
+ * PUT /draft.
+ */
+export interface LocalFieldError {
+  /** Path dạng backend: `stages[id=X].activities[N].config.<field>` */
+  path: string;
+  /** Mã lỗi — dùng chung key với CODE_MESSAGES trong validation-panel. */
+  code: string;
+  /** Mô tả tiếng Việt cụ thể cho lỗi này (ghi đè CODE_MESSAGES khi có). */
+  detail?: string;
+}
+
+/** Tra cứu tên bằng chứng/asset để message không phải UUID trần. */
+export interface ValidationCatalog {
+  /** id → title; missing id = bằng chứng đã xoá / không thuộc event. */
+  evidenceTitle?: (id: string) => string | undefined;
+  /** id → filename/label; missing = asset không còn. */
+  assetLabel?: (id: string) => string | undefined;
+}
+
+interface Ctx {
+  stage: Stage;
+  stageIdx: number;
+  act: Activity;
+  actIdx: number;
+  out: LocalFieldError[];
+  cat?: ValidationCatalog;
+  draft?: Draft;
+}
+
+function evidenceLabel(cat: ValidationCatalog | undefined, id: string): string {
+  const t = cat?.evidenceTitle?.(id);
+  if (t) return `«${t.length > 50 ? t.slice(0, 50) + "…" : t}»`;
+  return `'${id.slice(0, 8)}…'`;
+}
+
+const REQUIRED_FEEDBACK_TYPES: Record<string, true> = {
+  MULTIPLE_CHOICE: true,
+  EVIDENCE_SELECT: true,
+  MATCHING: true,
+  REASONING_CONNECT: true,
+  DRAG_ORDER: true,
+  VERIFICATION: true,
+  CER: true,
+  CER_CHOICE: true,
+};
+
+/** Issue #35: loại chấm tự động trả PARTIAL/EXHAUSTED ngoài COMPLETED/INCORRECT. */
+const GRADED_3_LEVEL_TYPES: Record<string, true> = {
+  EVIDENCE_SELECT: true,
+  MATCHING: true,
+  REASONING_CONNECT: true,
+  DRAG_ORDER: true,
+  CER_CHOICE: true,
+};
+/** MULTIPLE_CHOICE emits COMPLETED/INCORRECT + EXHAUSTED only — no PARTIAL. */
+const MCQ_TYPES: Record<string, true> = { MULTIPLE_CHOICE: true };
+function apath(c: Ctx, field?: string): string {
+  const base = `stages[id=${c.stage.id}].activities[${c.actIdx}]`;
+  return field ? `${base}.config.${field}` : `${base}.config`;
+}
+
+function push(c: Ctx, field: string | undefined, code: string, detail?: string) {
+  c.out.push({ path: apath(c, field), code, detail });
+}
+
+function getArray(v: unknown): unknown[] | null {
+  return Array.isArray(v) ? v : null;
+}
+
+function getStr(v: unknown): string | null {
+  return typeof v === "string" ? v : null;
+}
+
+/* ---- Per-type rules (mirror backend validators, PUBLISH level) ---- */
+
+function validateViewImage(c: Ctx) {
+  const cfg = c.act.config ?? {};
+  const id = cfg.imageAssetId;
+  if (id == null || id === "") {
+    push(c, "imageAssetId", "MISSING_FIELD", "Chưa chọn ảnh minh hoạ.");
+  }
+}
+
+function validateEvidenceSelect(c: Ctx) {
+  const cfg = c.act.config ?? {};
+  const vis = getArray(cfg.visibleEvidenceIds) ?? [];
+  if (vis.length < 1) {
+    push(c, "visibleEvidenceIds", "INVALID_CONFIG",
+      "Cần ít nhất 1 bằng chứng hiển thị cho học viên.");
+    return;
+  }
+  const min = typeof cfg.minRequired === "number" ? cfg.minRequired : 1;
+  if (min > vis.length) {
+    push(c, "minRequired", "INVALID_CONFIG",
+      `Yêu cầu chọn tối thiểu ${min} nhưng chỉ có ${vis.length} bằng chứng — hạ số tối thiểu hoặc thêm bằng chứng.`);
+  }
+  if (cfg.graded === true) {
+    const accepted = getArray(cfg.acceptedEvidenceIds);
+    if (!accepted || accepted.length === 0) {
+      push(c, "acceptedEvidenceIds", "MISSING_FIELD",
+        "Chế độ chấm điểm cần ít nhất 1 bằng chứng đúng.");
+    } else {
+      const visSet = new Set(vis.filter((x): x is string => typeof x === "string"));
+      const extra = accepted.filter((x) => typeof x === "string" && !visSet.has(x));
+      if (extra.length > 0) {
+        push(c, "acceptedEvidenceIds", "INVALID_CONFIG",
+          `Bằng chứng đúng ${extra.map((x) => evidenceLabel(c.cat, String(x))).join(", ")} chưa nằm trong danh sách hiển thị.`);
+      }
+    }
+  }
+  checkMaxAttempts(c);
+}
+
+function validateDragOrder(c: Ctx) {
+  const cfg = c.act.config ?? {};
+  const items = getArray(cfg.items) ?? [];
+  if (items.length < 2) {
+    push(c, "items", "INVALID_CONFIG", "Cần ít nhất 2 mục để sắp xếp.");
+    return;
+  }
+  const itemIds = new Set(
+    items.map((it) => (it && typeof it === "object" ? (it as { id?: unknown }).id : it))
+      .filter((x): x is string => typeof x === "string"),
+  );
+  const expected = getArray(cfg.expectedOrder);
+  if (!expected) {
+    push(c, "expectedOrder", "MISSING_FIELD", "Chưa khai báo thứ tự đúng.");
+    return;
+  }
+  const expSet = new Set(expected.filter((x): x is string => typeof x === "string"));
+  if (expSet.size !== itemIds.size || ![...expSet].every((x) => itemIds.has(x))) {
+    push(c, "expectedOrder", "INVALID_CONFIG",
+      "Thứ tự đúng phải là hoán vị của các mục — kiểm tra lại id mục.");
+  }
+  checkMaxAttempts(c);
+}
+
+function idOf(v: unknown): string | null {
+  if (v && typeof v === "object" && "id" in v && typeof v.id === "string") return v.id;
+  return null;
+}
+
+function validateMatching(c: Ctx) {
+  const cfg = c.act.config ?? {};
+  const pairs = getArray(cfg.pairs) ?? [];
+  if (pairs.length < 2) {
+    push(c, "pairs", "INVALID_CONFIG", "Cần ít nhất 2 cặp để ghép.");
+    return;
+  }
+  const leftIds = new Set<string>();
+  const rightIds = new Set<string>();
+  for (const p of pairs) {
+    if (!p || typeof p !== "object") continue;
+    const l = "left" in p ? idOf(p.left) : null;
+    const r = "right" in p ? idOf(p.right) : null;
+    if (l != null) leftIds.add(l);
+    if (r != null) rightIds.add(r);
+  }
+  const correct = getArray(cfg.correctPairs);
+  if (!correct || correct.length === 0) {
+    push(c, "correctPairs", "MISSING_FIELD",
+      "Chưa khai báo cặp ghép đúng — hoạt động chấm tự động cần đáp án.");
+  } else {
+    for (const cp of correct) {
+      if (!cp || typeof cp !== "object") continue;
+      const l = "left" in cp && typeof cp.left === "string" ? cp.left : null;
+      const r = "right" in cp && typeof cp.right === "string" ? cp.right : null;
+      if (l == null || !leftIds.has(l) || r == null || !rightIds.has(r)) {
+        push(c, "correctPairs", "INVALID_CONFIG",
+          "Cặp đúng phải tham chiếu id đã khai báo trong danh sách cặp.");
+        break;
+      }
+    }
+  }
+  checkMaxAttempts(c);
+}
+
+function validateMultipleChoice(c: Ctx) {
+  const cfg = c.act.config ?? {};
+  const options = getArray(cfg.options) ?? [];
+  if (options.length < 2) {
+    push(c, "options", "INVALID_CONFIG", "Cần ít nhất 2 phương án.");
+    return;
+  }
+  const optIds = new Set(
+    options.map((o) => idOf(o)).filter((x): x is string => x != null),
+  );
+  const correct = getArray(cfg.correctOptionIds);
+  const multi = getArray(cfg.multiCorrect);
+  const chosen = correct && correct.length > 0 ? correct : multi;
+  if (!chosen || chosen.length === 0) {
+    push(c, "correctOptionIds", "MISSING_FIELD",
+      "Chưa khai báo đáp án đúng — hoạt động chấm tự động cần đáp án.");
+  } else if (chosen.some((x) => typeof x === "string" && !optIds.has(x))) {
+    push(c, "correctOptionIds", "INVALID_CONFIG",
+      "Đáp án đúng phải nằm trong danh sách phương án.");
+  }
+  checkMaxAttempts(c);
+}
+
+function validateHypothesisChoice(c: Ctx) {
+  const cfg = c.act.config ?? {};
+  const hyps = getArray(cfg.hypotheses) ?? [];
+  if (hyps.length < 2) {
+    push(c, "hypotheses", "INVALID_CONFIG",
+      "Cần ít nhất 2 giả thuyết để học viên lựa chọn.");
+  }
+}
+
+function validateVerification(c: Ctx) {
+  checkMaxAttempts(c);
+  // FOUR_STEP interactive: cần visibleSourceIds + requiredEvidenceIds
+  // (publish-level). Legacy (evidenceSource) bỏ qua — server resolve từ output.
+  if (!c.draft || !isFourStep(c.draft)) return;
+  const cfg = c.act.config ?? {};
+  const isLegacy = typeof cfg.evidenceSource === "string" && cfg.evidenceSource.length > 0;
+  if (isLegacy) return;
+  const visible = getArray(cfg.visibleSourceIds) ?? [];
+  const required = getArray(cfg.requiredEvidenceIds) ?? [];
+  if (visible.length === 0) {
+    push(c, "visibleSourceIds", "MISSING_FIELD",
+      "Kiểm chứng tương tác cần ít nhất 1 bằng chứng để học viên chọn.");
+  }
+  if (required.length === 0) {
+    push(c, "requiredEvidenceIds", "MISSING_FIELD",
+      "Kiểm chứng tương tác cần ít nhất 1 bằng chứng bắt buộc.");
+  } else if (visible.length > 0) {
+    const visSet = new Set(visible.map(String));
+    for (const rid of required.map(String)) {
+      if (!visSet.has(rid)) {
+        push(c, "requiredEvidenceIds", "INVALID_CONFIG",
+          `Bằng chứng bắt buộc "${rid}" không nằm trong danh sách cho học viên chọn.`);
+        break;
+      }
+    }
+  }
+}
+
+function validateReasoningConnect(c: Ctx) {
+  const cfg = c.act.config ?? {};
+  if (cfg.graded === true) {
+    const hasExpected = (getArray(cfg.expectedRelations) ?? []).length > 0;
+    const hasAlts = (getArray(cfg.acceptedRelationSets) ?? []).length > 0;
+    if (!hasExpected && !hasAlts) {
+      push(c, "expectedRelations", "MISSING_FIELD",
+        "Chế độ chấm điểm cần quan hệ đúng hoặc tập chấp nhận được.");
+    }
+  }
+  checkMaxAttempts(c);
+}
+
+function checkMaxAttempts(c: Ctx) {
+  const cfg = c.act.config ?? {};
+  const v = cfg.maxAttempts;
+  if (v == null) return;
+  if (typeof v !== "number" || !Number.isInteger(v) || v < 1 || v > 20) {
+    push(c, "maxAttempts", "INVALID_VALUE",
+      "Số lượt thử tối đa phải là số nguyên 1–20.");
+  }
+}
+function validateCerChoice(c: Ctx) {
+  const cfg = c.act.config ?? {};
+  const claims = getArray(cfg.claims) ?? [];
+  const evidOpts = getArray(cfg.evidenceOptions) ?? [];
+  const reasoningOpts = getArray(cfg.reasoningOptions) ?? [];
+  const combos = getArray(cfg.acceptedCombos) ?? [];
+
+  if (claims.length < 2) {
+    push(c, "claims", "INVALID_CONFIG", "Cần ít nhất 2 nhận định để học viên chọn.");
+  }
+  if (evidOpts.length === 0) {
+    push(c, "evidenceOptions", "INVALID_CONFIG",
+      "Cần ít nhất 1 bằng chứng trong tuỳ chọn.");
+  }
+  if (reasoningOpts.length < 2) {
+    push(c, "reasoningOptions", "INVALID_CONFIG",
+      "Cần ít nhất 2 lập luận trong tuỳ chọn.");
+  }
+  if (combos.length === 0) {
+    push(c, "acceptedCombos", "MISSING_FIELD",
+      "Cần ít nhất 1 tổ hợp đúng (claim + bằng chứng + lập luận).");
+    return;
+  }
+
+  const claimIds = new Set(
+    claims.map((x) => (x && typeof x === "object" ? (x as { id?: unknown }).id : null))
+      .filter((x): x is string => typeof x === "string"),
+  );
+  const evidIds = new Set(
+    evidOpts.map((x) => (x && typeof x === "object" ? (x as { id?: unknown }).id : null))
+      .filter((x): x is string => typeof x === "string"),
+  );
+  const reasoningIds = new Set(
+    reasoningOpts.map((x) => (x && typeof x === "object" ? (x as { id?: unknown }).id : null))
+      .filter((x): x is string => typeof x === "string"),
+  );
+
+  for (let i = 0; i < combos.length; i++) {
+    const combo = combos[i];
+    if (!combo || typeof combo !== "object") continue;
+    const cb = combo as { claimId?: unknown; evidenceIds?: unknown; reasoningId?: unknown };
+    const claimId = getStr(cb.claimId);
+    if (claimId == null || !claimIds.has(claimId)) {
+      push(c, `acceptedCombos[${i}].claimId`, "INVALID_CONFIG",
+        `Tổ hợp ${i + 1}: claim không khớp nhận định nào.`);
+    }
+    const evIds = getArray(cb.evidenceIds) ?? [];
+    if (evIds.length === 0) {
+      push(c, `acceptedCombos[${i}].evidenceIds`, "MISSING_FIELD",
+        `Tổ hợp ${i + 1}: cần chọn ít nhất 1 bằng chứng đúng.`);
+    }
+    for (const e of evIds) {
+      const s = getStr(e);
+      if (s != null && !evidIds.has(s)) {
+        push(c, `acceptedCombos[${i}].evidenceIds`, "INVALID_CONFIG",
+          `Tổ hợp ${i + 1}: bằng chứng ${evidenceLabel(c.cat, s)} chưa có trong danh sách tuỳ chọn bằng chứng.`);
+        break;
+      }
+    }
+    const rid = getStr(cb.reasoningId);
+    if (rid == null || !reasoningIds.has(rid)) {
+      push(c, `acceptedCombos[${i}].reasoningId`, "INVALID_CONFIG",
+        `Tổ hợp ${i + 1}: lập luận không khớp tuỳ chọn nào.`);
+    }
+  }
+}
+
+function validateFeedback(c: Ctx) {
+  if (!REQUIRED_FEEDBACK_TYPES[c.act.type]) return;
+  const fb = c.act.feedback ?? {};
+  const missing: string[] = [];
+  if (typeof fb.COMPLETED !== "string" || !fb.COMPLETED.trim()) missing.push("COMPLETED");
+  const isUngradedEvidenceSelect =
+    c.act.type === "EVIDENCE_SELECT" && c.act.config?.graded !== true;
+  if (!isUngradedEvidenceSelect) {
+    if (typeof fb.INCORRECT !== "string" || !fb.INCORRECT.trim()) missing.push("INCORRECT");
+  }
+  // Issue #35: chuỗi auto-graded báo 3 mức + hết lượt thử (EVIDENCE_SELECT chỉ khi graded:true).
+  if (GRADED_3_LEVEL_TYPES[c.act.type] && !isUngradedEvidenceSelect) {
+    if (typeof fb.PARTIAL !== "string" || !fb.PARTIAL.trim()) missing.push("PARTIAL");
+    if (typeof fb.EXHAUSTED !== "string" || !fb.EXHAUSTED.trim()) missing.push("EXHAUSTED");
+  }
+  if (MCQ_TYPES[c.act.type]) {
+    if (typeof fb.EXHAUSTED !== "string" || !fb.EXHAUSTED.trim()) missing.push("EXHAUSTED");
+  }
+  if (c.act.type === "VERIFICATION") {
+    if (typeof fb.SUPPORTED !== "string" || !fb.SUPPORTED.trim()) missing.push("SUPPORTED");
+    if (typeof fb.CONTRADICTED !== "string" || !fb.CONTRADICTED.trim()) missing.push("CONTRADICTED");
+  }
+  if (missing.length > 0) {
+    c.out.push({
+      path: `stages[id=${c.stage.id}].activities[${c.actIdx}].feedback`,
+      code: "MISSING_FIELD",
+      detail: `Thiếu phản hồi ${missing.join(" + ")} — điền đủ để học viên biết đúng/sai.`,
+    });
+  }
+}
+
+/* ---- Public API ---- */
+
+/**
+ * Chạy toàn bộ rule client-side trên draft hiện tại. Trả về [] nếu OK để
+ * submit. Cùng thứ tự duyệt với backend để error ordering quen thuộc.
+ */
+export function validateDraftLocally(
+  draft: Draft,
+  catalog?: ValidationCatalog,
+): LocalFieldError[] {
+  const out: LocalFieldError[] = [];
+  for (let s = 0; s < draft.stages.length; s++) {
+    const stage = draft.stages[s];
+    if (!stage) continue;
+    for (let a = 0; a < stage.activities.length; a++) {
+      const act = stage.activities[a];
+      if (!act) continue;
+      const ctx: Ctx = { stage, stageIdx: s, act, actIdx: a, out, cat: catalog, draft };
+      switch (act.type) {
+        case "VIEW_IMAGE": validateViewImage(ctx); break;
+        case "EVIDENCE_SELECT": validateEvidenceSelect(ctx); break;
+        case "DRAG_ORDER": validateDragOrder(ctx); break;
+        case "MATCHING": validateMatching(ctx); break;
+        case "MULTIPLE_CHOICE": validateMultipleChoice(ctx); break;
+        case "HYPOTHESIS_CHOICE": validateHypothesisChoice(ctx); break;
+        case "VERIFICATION": validateVerification(ctx); break;
+        case "REASONING_CONNECT": validateReasoningConnect(ctx); break;
+        case "CER_CHOICE": validateCerChoice(ctx); break;
+      }
+      validateFeedback(ctx);
+    }
+  }
+  validateFourStepFlow(draft, out);
+  return out;
+}
+
+/* ---- 4-step flow validation (DISCOVERY with 4 clues + HYPOTHESIS +
+ * VERIFICATION + RECONSTRUCTION) — mirrors DraftValidator.validateFourStepModel. */
+
+const FOUR_STEP_TYPES = ["DISCOVERY", "HYPOTHESIS", "VERIFICATION", "RECONSTRUCTION"] as const;
+const CLUE_TYPES = ["CONTEXT", "CHARACTERS", "DEVELOPMENT", "SIGNIFICANCE"] as const;
+
+function isFourStep(draft: Draft): boolean {
+  if (draft.flowModel === "FOUR_STEP") return true;
+  return draft.stages.some(
+    (s) => s.type === "DISCOVERY" && s.activities.some((a) => a.clueType != null),
+  );
+}
+
+function validateFourStepFlow(draft: Draft, out: LocalFieldError[]) {
+  if (!isFourStep(draft)) return;
+
+  if (draft.flowModel === "FOUR_STEP") {
+    if (draft.stages.length !== FOUR_STEP_TYPES.length) {
+      out.push({
+        path: "stages",
+        code: "INVALID_FOUR_STEP_STRUCTURE",
+        detail: `Bài học 4 bước phải có đúng 4 giai đoạn: Truy tìm dấu vết, Đặt giả thuyết, Kiểm chứng, Tái hiện — hiện có ${draft.stages.length}.`,
+      });
+      return;
+    }
+    for (let i = 0; i < FOUR_STEP_TYPES.length; i++) {
+      const stage = draft.stages[i];
+      if (!stage) continue;
+      const expected = FOUR_STEP_TYPES[i];
+      if (stage.type !== expected) {
+        out.push({
+          path: `stages[${i}].type`,
+          code: "INVALID_FOUR_STEP_STRUCTURE",
+          detail: `Bước ${i + 1} phải là ${expected === "DISCOVERY" ? "Truy tìm dấu vết" : expected === "HYPOTHESIS" ? "Đặt giả thuyết" : expected === "VERIFICATION" ? "Kiểm chứng" : "Tái hiện"} — hiện là "${stage.type}".`,
+        });
+      }
+    }
+  }
+
+  // Validate DISCOVERY stage: exactly 4 clue activities, all clue types, all required.
+  const discoveryStage = draft.stages.find((s) => s.type === "DISCOVERY");
+  if (discoveryStage) {
+    const clueActs = discoveryStage.activities.filter((a) => a.clueType != null);
+    const seenTypes = new Set(clueActs.map((a) => a.clueType));
+    for (const ct of CLUE_TYPES) {
+      if (!seenTypes.has(ct)) {
+        out.push({
+          path: `stages[id=${discoveryStage.id}].activities`,
+          code: "MISSING_CLUE_TYPES",
+          detail: `Bước 1 thiếu dấu vết "${ct === "CONTEXT" ? "Bối cảnh" : ct === "CHARACTERS" ? "Nhân vật" : ct === "DEVELOPMENT" ? "Diễn biến" : "Ý nghĩa"}".`,
+        });
+      }
+    }
+    if (clueActs.length > 0 && discoveryStage.activities.length !== CLUE_TYPES.length) {
+      out.push({
+        path: `stages[id=${discoveryStage.id}].activities`,
+        code: "INVALID_CLUE_COUNT",
+        detail: `Bước 1 có ${discoveryStage.activities.length} hoạt động — mỗi dấu vết chỉ có 1 hoạt động chính (tổng 4).`,
+      });
+    }
+    for (const a of discoveryStage.activities) {
+      if (a.clueType == null) {
+        out.push({
+          path: `stages[id=${discoveryStage.id}].activities[].clueType`,
+          code: "MISSING_FIELD",
+          detail: "Mỗi hoạt động trong Bước 1 phải gán một loại dấu vết.",
+        });
+      }
+      if (!a.required) {
+        out.push({
+          path: `stages[id=${discoveryStage.id}].activities[].required`,
+          code: "INVALID_CONFIG",
+          detail: "Mỗi dấu vết trong Bước 1 phải là bắt buộc.",
+        });
+      }
+    }
+  }
+
+  // Non-DISCOVERY steps must each have exactly 1 activity.
+  for (const expected of ["HYPOTHESIS", "VERIFICATION", "RECONSTRUCTION"] as const) {
+    const idx = draft.stages.findIndex((s) => s.type === expected);
+    const stage = idx >= 0 ? draft.stages[idx] : undefined;
+    if (!stage) continue;
+    if (stage.activities.length !== 1) {
+      out.push({
+        path: `stages[id=${stage.id}].activities`,
+        code: "INVALID_FOUR_STEP_STRUCTURE",
+        detail: `Bước "${expected === "HYPOTHESIS" ? "Đặt giả thuyết" : expected === "VERIFICATION" ? "Kiểm chứng" : "Tái hiện"}" phải có đúng 1 hoạt động chính — hiện có ${stage.activities.length}.`,
+      });
+      continue;
+    }
+    // HYPOTHESIS stage must use HYPOTHESIS_CHOICE — output contract for VERIFICATION.
+    if (expected === "HYPOTHESIS" && stage.activities[0]?.type !== "HYPOTHESIS_CHOICE") {
+      out.push({
+        path: `stages[id=${stage.id}].activities[0].type`,
+        code: "INVALID_FOUR_STEP_STRUCTURE",
+        detail: `Bước Đặt giả thuyết phải dùng hoạt động "Đặt giả thuyết" (HYPOTHESIS_CHOICE) — hiện là "${stage.activities[0]?.type}".`,
+      });
+    }
+  }
+}

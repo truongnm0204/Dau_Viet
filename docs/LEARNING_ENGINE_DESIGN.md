@@ -29,7 +29,7 @@
 | Hypothesis | HYPOTHESIS_CHOICE, CLAIM_EVIDENCE | hypothesis + linkedEvidenceIds[] |
 | Reconstruction | DRAG_ORDER, MAP_PLACE | orderedSequence / reconstruction |
 | Verification | VERIFY | `SUPPORTED`, `PARTIAL`, `CONTRADICTED` + feedback |
-| Conclusion | CER | claim, evidenceIds[], reasoning |
+| Conclusion | CER_CHOICE (Learning Flow 2.0) hoặc legacy CER | claimId + evidenceIds[] + reasoningId, graded parts |
 | Reflection | REFLECTION_PROMPT (optional MVP) | reflectionText/takeaway |
 
 Framework là tầng tư duy. Template có thể chọn/bỏ/đổi thứ tự stage trong guardrails; `Reflection` có thể optional, còn Conclusion hoặc equivalent phải có trước hoàn thành theo tài liệu BA mới.
@@ -90,7 +90,7 @@ public enum ActivityType {
     READ, VIEW_IMAGE, MULTIPLE_CHOICE, EXPLORE_MAP,
     EVIDENCE_SELECT, MATCHING, REASONING_CONNECT,
     HYPOTHESIS_CHOICE, DRAG_ORDER, VERIFICATION,
-    CER, REFLECTION_PROMPT
+    CER, CER_CHOICE, REFLECTION_PROMPT
 }
 
 public interface ActivityHandler {
@@ -152,9 +152,33 @@ Domain exceptions custom phải định nghĩa khi code. Registry đảm bảo a
 | DRAG_ORDER | orderedIds[] | same set as configured, accepted sequences | reconstruction |
 | VERIFICATION | submission/acknowledgment | support mapping from previous outputs | verificationResult |
 | CER | claim, evidenceIds[], reasoning | structure/preset rubric (avoid naive free-text exact match) | conclusion |
+| CER_CHOICE | claimId, evidenceIds[], reasoningId | per-part grading vs `acceptedCombos[]` (exact combo → correct; `partsCorrect/3` score, no partial promotion) | conclusion + parts score |
 | REFLECTION_PROMPT | text or optionId | length/basic constraints; optional | reflection |
 
 **UX:** Drag & drop cần fallback tap/reorder; kiểm chứng không chỉ pass/fail mà có feedback và đường sửa giả thuyết.
+
+### Animation Engine (V14+, TASK 2026-10-23)
+
+`READ` activity có thể mang cảnh hoạt họa data-driven thay vì animation hard-code:
+
+- `activity.config.animationSceneId` + `animationSceneVersionId` + `playbackMode ∈ {AUTO,STEPPED,INTERACTIVE}` — ghim tới `animation_scene_versions` bất biến; loại trừ lẫn nhau với legacy `animationKey` (`DraftValidator` → 422 khi cả hai cùng tồn tại).
+- `SnapshotBuilder.embedAnimationScenes` đọc `animationSceneVersionId` từ draft, nạp `animation_scene_versions.snapshot_json` và ghi `config.animationManifest = {manifest, sceneVersionId, versionNo, rendererCode, rendererVersion}` vào `lesson_versions.snapshot_json` — learner chỉ nhận bản snapshot bất biến, không bao giờ thấy `draftJson` của scene.
+- Mobile `AnimationRuntimeRegistry` map `rendererCode → AnimationSceneRenderer` (RIVER_TIDE/JOURNEY_MAP); rendererCode lạ → `_UnsupportedAnimationNotice` (fallback, không crash); manifest lỗi → plain READ; `animationKey` cũ vẫn qua `HistoricalAnimationRegistry` (back-compat).
+- `READ` hoạt họa KHÔNG tạo attempt state riêng — submit vẫn `acknowledgment` như READ thường; prediction/interaction là local UI state (client-side), không ghi `activity_attempts` trừ khi author thêm activity khác (MULTIPLE_CHOICE...) cho đánh giá.
+
+#### Cinematic 2.5D (manifest v2, TASK 2026-10-24)
+
+Manifest `schemaVersion=2` thêm 5 optional keys `{camera, tracks, effects, audio, environment}` — đánh giá bởi `CinematicEvaluator` (pure-Dart deterministic, không phụ thuộc widget/painter):
+
+- `camera`: `initial + steps[i].target {x,y,zoom}` — lerp qua `CameraState.lerp`; `cameraAt(stepIdx, easedT)` lerp từ target bước trước. `transformFor(size)` → Matrix4 áp lên scene stack (ClipRect + Transform).
+- `tracks`: keyframe `position|scale|rotation|opacity|visible` cho `objects[]` — `valueAt(globalTMs)` lerp giữa keyframes theo easing; `tMs` đánh từ timeline toàn cục `sum(stepDurationsMs[0..i])`.
+- `effects`: typed overlay `WATER_RIPPLE|MIST|GLOW|ROUTE_REVEAL|FADE_IN|FADE_OUT` — `stepId` rỗng = ambient; `progress = stepElapsed/durationMs`; `GLOW.params.objectId` follow object hiện tại.
+- `audio`: cue `ENTER|EXIT|LOOP` gắn `stepId` → `AnimationAudioController` lifecycle `onStepEnter/Exit/Pause/Resume/Skip/dispose`; resolve `assetRef` → `assets[].assetId` role `AUDIO`; muted/missing-asset = no-op.
+- `environment`: RIVER_TIDE ambient `{waterLevel?, mist?, glow?}` — `waterLevel` seed trước `initialState` (priority thấp); `mist/glow` overlay dưới/trên painter qua `EnvironmentOverlay`.
+- Reduced-motion (`disableAnimations`): bỏ tween, emit `frameEndAt(stepIdx)` tĩnh ngay + hold 4s/bước; camera/track/effect đều tới end-state không interpolation.
+- Parity contract: `dau-viet-admin/.../preview/cinematic-eval.ts` là bản port 1-1 của `cinematic_state.dart` — mọi thay đổi công thức phải cập nhật cả hai. Admin `ScenePreview` evaluate tĩnh tại `progress=1` mỗi bước (không real-time playback).
+
+**Authoring allow-map (đã chốt TASK-0009):** bảng §2 là "hoạt động tiêu biểu" theo tư duy; phía authoring (`DraftSchema.STAGE_ALLOWED_ACTIVITIES`) cho phép `READ` ở mọi stage và `MULTIPLE_CHOICE` cũng được dùng trong `EVIDENCE`, `REASONING`, `VERIFICATION` (kiểm tra nhận diện/đối chứng nhanh), ngoài các ánh xạ tự nhiên theo bảng trên. Vi phạm → `STAGE_ACTIVITY_MISMATCH` (422) khi save draft.
 
 ## 7. Attempt state machine
 
@@ -216,11 +240,11 @@ Publish phải chặn nếu:
 | Hypothesis | HYPOTHESIS_CHOICE | Chọn giải thích và evidence support |
 | Reconstruction | DRAG_ORDER | Chuẩn bị → nhử địch → nước rút → phản công |
 | Verification | VERIFICATION | Supported/Partial/Contradicted và feedback |
-| Conclusion | CER | Trả lời câu hỏi lịch sử bằng claim + evidence + reasoning |
-| Reflection | REFLECTION_PROMPT | Một điều học được (optional) |
+| Conclusion | CER_CHOICE (v2 fixture) / CER (legacy) | Trả lời câu hỏi lịch sử bằng claim + evidence + reasoning |
+| Reflection | REFLECTION_PROMPT | Một điều học được (optional, ungraded) |
 | Result | System screen (không bắt buộc là stage) | Story/result/EXP nếu rule cho phép |
 
-Dùng lesson thứ hai (ví dụ Cách mạng tháng Tám 1945, template `DECISION_ANALYSIS`) để chứng minh **không cần đổi Java handlers/Flutter renderers** khi thêm nội dung.
+Dùng lesson thứ hai (ví dụ Cách mạng tháng Tám 1945, template `DECISION_ANALYSIS`) để chứng minh **không cần đổi Java handlers/Flutter renderers** khi thêm nội dung. Learning Flow 2.0 đã chứng minh điều này bằng fixture `hai-ba-trung-40.draft.json` (Hai Bà Trưng 40) chạy cùng engine không event-specific branch.
 
 ## 11. Flutter renderer contract
 
@@ -254,15 +278,141 @@ Snippet biểu diễn pattern, chưa phải code chạy độc lập; tất cả
 - [ ] Pause/resume mở đúng activity cùng lesson version.
 - [ ] Bạch Đằng 938 và lesson thứ hai chạy từ snapshot config, không thay handler.
 
-## 13. Open decisions
+## 13. Evaluation semantics đã chốt (TASK-0011)
+
+Phần này ghi lại các quyết định semantic cho những điểm BA chưa định nghĩa deterministic rule, đã được duyệt khi implement `com.dauviet.learning`:
+
+| ActivityType | Quy tắc evaluate (server-authoritative) |
+|---|---|
+| READ, VIEW_IMAGE | Bất kỳ submission nào cũng là acknowledgment → `COMPLETED`, output `{viewed:true}`. |
+| MULTIPLE_CHOICE | `selectedOptionIds` so set-equality với `correctOptionIds` → `COMPLETED`/`INCORRECT`. `maxAttempts` (default 1) đạt giới hạn → `exhausted:true`, activity vẫn tính completed (cursor đi tiếp). Option id không khai báo trong `config.options` → `INCORRECT` (không 500). |
+| MATCHING | `pairs` (`"l=r"`) so pair-set với `correctPairs` → `COMPLETED`/`INCORRECT`. |
+| DRAG_ORDER | `orderedIds` so order-equality với `expectedOrder`/`correctOrder` ∪ `acceptedSequences` → `COMPLETED`/`INCORRECT`. |
+| EVIDENCE_SELECT | `selectedEvidenceIds` ⊆ snapshot evidence ∩ `visibleEvidenceIds` (id lạ → `INCORRECT`); `completed` khi số hợp lệ ≥ `minRequired` (default 1). **Opt-in `config.graded:true`**: đòi `acceptedEvidenceIds`; exact-set → `COMPLETED`, partial overlap → `PARTIAL` + **`score=F1=2·hits/(|submitted|+|accepted|)`** (select-all < 1.0), không trúng → `INCORRECT`; `maxAttempts` (default 1) hết → `exhausted:true` vẫn completed. |
+| EXPLORE_MAP | Tích luỹ `discoveredMarkerIds` qua `priorOutputs` (idempotent); `completed` khi đủ `minMarkers` (default = tất cả markers trong config). |
+| HYPOTHESIS_CHOICE | Ghi `{hypothesisId, evidenceIds}` vào outputs (không chấm đúng/sai) → luôn `COMPLETED`; dữ liệu là input cho VERIFICATION. |
+| VERIFICATION | Đọc hypothesis mới nhất từ `priorOutputs`: `SUPPORTED` khi hypothesis khớp `expectedHypothesis` (nếu authored) VÀ evidence ⊇ `requiredEvidenceIds`; `PARTIAL` khi có hypothesis nhưng thiếu; `CONTRADICTED` khi không có/không khớp. Chỉ `SUPPORTED` mới `completed`. **Evidence set (Learning Flow 2.0 §P0):** `config.evidenceSource` → `priorOutputs[source].selectedEvidenceIds` là authoritative — client-submitted ids bị ignore; source thiếu → PARTIAL; snapshot cũ không có `evidenceSource` → fallback `hypothesis.evidenceIds`. Publish chặn source id không tồn tại/không phải EVIDENCE_SELECT/không đứng trước consumer. Không echo required/expected keys trong output. |
+| REASONING_CONNECT | Validate `relations[].{from,to}` ∈ `config.nodes[].id` và `relation` ∈ `allowedRelations` → `COMPLETED` + `relationCount`; id/relation lạ → `INCORRECT`. **Opt-in `config.graded:true`**: đòi `expectedRelations` hoặc `acceptedRelationSets`; submitted set khớp chính xác một accepted set → `COMPLETED`, ngược lại best-match partial **`score=F1=2·hits/(|submitted|+|best|)`**; `maxAttempts` hết → `exhausted`. Output chỉ chứa counts/score, không echo expected relations. |
+| CER | `claim` + `reasoning` ≥ 20 ký tự mỗi field → `COMPLETED`; `evidenceIds` được filter theo snapshot evidence; output echo claim/reasoning/evidenceIds. Không exact-match free text. |
+| CER_CHOICE | `claimId` ∈ `claims`, `reasoningId` ∈ `reasoningOptions`, `evidenceIds` ⊆ `evidenceOptions` ∪ snapshot evidence ∪ `priorOutputs[priorEvidenceSource].selectedEvidenceIds`; đúng hoàn toàn khi cả 3 phần khớp chính xác một `acceptedCombos[]{claimId,evidenceIds[],reasoningId}` (evidence set-equality); `score=partsCorrect/3`, partial không promote; `maxAttempts` (default 3) hết → `exhausted` completed-for-progress `correct=false` (chống soft-lock). Legacy flat keys → cartesian combos. Publish reject `minCorrect`. |
+| REFLECTION_PROMPT | `text` non-empty ≤ 4000 ký tự hoặc `optionId` hợp lệ → `COMPLETED`. |
+
+### 13.1 Issue #35 — 4-phase learning chain & shared grading output
+
+**Canonical stage sequence (seeded templates + all 4 published lessons):**
+`CONTEXT → DISCOVERY (Khám phá 4 Dấu Vết — EXPLORE_MAP/VIEW_IMAGE/MULTIPLE_CHOICE teaser) → EVIDENCE (EVIDENCE_SELECT graded → collect 4 groups) → HYPOTHESIS (Đặt giả thuyết) → VERIFICATION (Kiểm chứng) → RECONSTRUCTION (Dựng lại sự kiện) → CONCLUSION (Kết luận CER)`. `STAGE_ALLOWED_ACTIVITIES` (TASK-0028) — `DISCOVERY`: `EXPLORE_MAP`,`VIEW_IMAGE`,`MULTIPLE_CHOICE`,`READ`; `EVIDENCE`: `EVIDENCE_SELECT`,`MULTIPLE_CHOICE`,`VIEW_IMAGE`,`READ`; `HYPOTHESIS`: `HYPOTHESIS_CHOICE`,`MULTIPLE_CHOICE`,`READ`; `VERIFICATION`: `VERIFICATION`,`MULTIPLE_CHOICE`,`READ`. No event-specific branches in generic handlers.
+
+**Shared 3-level grading output (TASK-0028):** handlers for `MATCHING`, `DRAG_ORDER`, `CER_CHOICE`, `EVIDENCE_SELECT` (graded), `REASONING_CONNECT` (graded), `MULTIPLE_CHOICE` emit a uniform output so mobile can render "Đúng k/n mục · còn x/y lượt" without per-type branches:
+
+| Output field | Meaning | Emitted by |
+|---|---|---|
+| `correctPositions` | items in correct position / matched pairs | DRAG_ORDER, MATCHING |
+| `totalItems` | canonical item count | DRAG_ORDER, MATCHING |
+| `matchedCount` | MATCHING alias for `correctPositions` | MATCHING |
+| `partsCorrect` | combo parts correct | CER_CHOICE |
+| `attemptCount` | submits so far (`attemptCounts` ledger) | all bounded handlers |
+| `exhausted` | budget spent; completed-for-progress | all bounded handlers |
+| `score` | 0..1 partial credit | graded handlers |
+
+Outcome enum remains `COMPLETED`/`PARTIAL`/`INCORRECT`/`SUPPORTED`/`CONTRADICTED`. **PARTIAL thresholds:**
+- `DRAG_ORDER`: `correctPositions·2 ≥ |canonical|` → PARTIAL; canonical = `expectedOrder` else first `acceptedSequences`.
+- `MATCHING`: `correctCount > 0 && !exhausted` → PARTIAL; full `correctCount` → COMPLETED.
+- `CER_CHOICE`: `partsCorrect ≥ 1` → PARTIAL; `score = partsCorrect/3`.
+
+`maxAttempts` (default 3 on `MATCHING`/`DRAG_ORDER`/`CER_CHOICE`; 1 on `MULTIPLE_CHOICE`/`EVIDENCE_SELECT`; `VERIFICATION` 0=unbounded): publish validators enforce `1 ≤ maxAttempts ≤ 20`; `EXHAUSTED` is a distinct feedback key.
+
+**Mobile contract:** `EvaluationDto.output` exposes the same keys; `LessonPlayerScreen.lastEvaluation` survives retry-in-place and feeds `ActivityRenderer` → `InlineGradingHint` prints `Đúng k/n · còn x/y` whenever outcome ∉ {COMPLETED, SUPPORTED}. VerificationRenderer reads `verificationVerdict` for SUPPORTED/CONTRADICTED variants.
+
+
+**Issue #43 — `EVIDENCE_SELECT` 2 chế độ (`COLLECT` / `ASSESS`) & learner-facing UX contract (TASK-0034):**
+- **`COLLECT` (`config.graded:false` / mặc định)**: thu thập bằng chứng tự do; hoàn thành khi `|selectedEvidenceIds| ≥ minRequired` (mặc định 1); không trừ Thể lực, không phát `selectedVerdicts`. Tập `selectedEvidenceIds` được lưu vào `priorOutputs` và nuôi `HYPOTHESIS_CHOICE` (`priorEvidenceSource`), `VERIFICATION` (`evidenceSource`) và `CER_CHOICE` (`priorEvidenceSource`) — nếu chọn thiếu bằng chứng cốt lõi, `VERIFICATION` trả `PARTIAL` và `onPartial` đưa học viên quay lại bổ sung. Mobile hiển thị eyebrow `"THU THẬP DẤU VẾT · CHỌN ÍT NHẤT {minRequired}"` và subtitle không đe Thể lực.
+- **`ASSESS` (`config.graded:true` + `acceptedEvidenceIds`)**: đánh giá kỹ năng phân biệt nguồn; chấm exact-set + partial F1 (`score = 2·hits/(|submitted|+|accepted|)`), trừ Thể lực khi `INCORRECT`, giới hạn bởi `maxAttempts` + `remedialAttempts`. `minRequired` chỉ là ngưỡng bật nút Gửi (submit-gate), không phải đáp án đúng. Mobile hiển thị eyebrow `"THU THẬP DẤU VẾT · CHỌN ĐÚNG CÁC DẤU VẾT LIÊN QUAN"`, subtitle nêu rõ chi phí Thể lực và số lượt còn lại.
+- **Per-card verdict an toàn (`output.selectedVerdicts`)**: ở chế độ `ASSESS`, `EvidenceSelectHandler` phát thêm `selectedVerdicts: { "<submittedId>": "correct" | "incorrect" }` **chỉ cho các id học viên đã nộp trong lượt đó** (và khi vượt ngân sách `overBudget` thì giữ nguyên `selectedVerdicts` đã khoá của lượt cuối trong ngân sách, chống dò đáp án). Tuyệt đối không lộ các id thuộc `acceptedEvidenceIds` mà học viên chưa chọn. Mobile hiển thị nhãn `✓ Đúng dấu vết liên quan` / `✗ Chưa liên quan câu hỏi` trên từng thẻ đã chọn và mở rộng `InlineGradingHint` cho cả `correctCount`/`falseCount`, `score`-only và `exhausted`/`budgetExhausted`.
+- **Tách vùng chạm & nhãn tiến độ**: chạm vào thân thẻ `_EvidenceCard` chỉ mở bottom sheet đọc chi tiết (`_EvidenceDetailSheet`); chỉ nút `Chọn`/`Đã chọn` riêng biệt ở cạnh phải (hoặc nút trong sheet) mới toggle chọn. Chip tiến độ trên `LessonPlayerScreen` hiển thị `"Bước {completedRequired}/{totalRequired}"`.
+- **Admin `EvidenceSelectEditor`**: mở chọn giữa 2 chế độ `Thu thập bằng chứng (không chấm điểm)` và `Đánh giá bằng chứng (chấm điểm)`, kèm hướng dẫn cơ chế từng trường, hộp xem trước trải nghiệm học viên (`Learner Preview`), kiểm tra `acceptedEvidenceIds ⊆ visibleEvidenceIds`, và cảnh báo khi danh sách `ASSESS` chưa có dấu vết bẫy (`accepted.size == visible.size`).
+`AttemptState` (`state_json`): `{completedActivityIds[], discoveredMarkerIds[], outputs{activityId:{...}}, attemptCounts{activityId:n}, currentStageId, currentActivityId}` — learner-safe, không chứa hidden keys. `attemptCounts` là **retry-budget ledger** tồn tại độc lập với `outputs` (TASK-0020 round-3): dependent-output invalidation xóa output nhưng **không** refund lượt thử — nếu không, VERIFICATION bounded bởi `maxAttempts` sẽ bị reset budget mỗi lần upstream re-submit và lặp vô hạn. Handler đọc số lần thử qua `AttemptContext.attemptCounts` (fallback: `output.attemptCount` cho state cũ chưa có ledger).
+
+**Stage transition resolver** (thứ tự ưu tiên): **(-1) REMEDIAL STAY — activity required vừa submit mà output `exhausted:true` nhưng còn `remedialAttempts` trong budget → cursor GIỮ NGUYÊN cho lượt remedial** (TASK-0020 round-3); **(0) activity required vừa submit mà `completed=false` → REVISE hop nếu `onPartial`/`onContradicted` khớp target, ngược lại cursor GIỮ NGUYÊN để retry** (chống soft-lock khi MCQ chưa hết `maxAttempts`, VERIFICATION `PARTIAL`/`CONTRADICTED`, EVIDENCE_SELECT/EXPLORE_MAP chưa đủ ngưỡng; các bước (a)–(e) chỉ chạy sau submit completed hoặc optional); (a) required activity chưa xong kế tiếp trong cùng stage sau activity vừa submit; (b) REVISE hop (target thiếu → bỏ qua; **bị chặn khi activity vừa submit đã `exhausted:true`** — VERIFICATION cạn budget mà vẫn hop về EVIDENCE_SELECT cạn budget sẽ tái tạo đúng vòng lặp vô hạn mà remedial bound phá; budget đã tiêu thì learner phải đi tới, không quay lại làm việc không thể đổi verdict); (c) đi tới qua `nextStageIds` — target đầu tiên còn required activity chưa xong thắng; stage đã COMPLETE không lộ successors, chỉ stage "transparent" (không có required activity) mới được traverse xuyên qua; (d) fallback stage đầu tiên theo array-order còn required chưa xong; (e) `null` = hết đường đi. Cycle-safe qua visited set.
+
+**Optional activity navigation** (chốt 2026-10-16): cursor chỉ dừng ở required activity; submit lên activity **optional trong current stage** được chấp nhận — evaluate + ghi `activity_attempts` + `outputs` bình thường nhưng **không đổi cursor, không tính progress/completion**. Learner "experience" optional bằng cách submit nó; "skip" bằng cách đi tiếp (cursor vốn đã chỉ vào required). Optional ở stage khác → `409 ACTIVITY_NOT_AVAILABLE`.
+
+**Optional STAGE semantics** (chốt 2026-10-16 sau P1 review): `stage.required=false` làm toàn bộ activities bên trong optional cho progress/completion/cursor — `SnapshotModel.requiredActivities()` chỉ trả activities khi stage `required:true`. Cursor không bao giờ bị kéo vào optional stage (resolver traverse xuyên như stage "transparent"); progress `totalRequired` không đếm; `DEFAULT_ALL_REQUIRED` không gate. `activity.required=true` bên trong optional stage là shape mâu thuẫn — publish reject `REQUIRED_IN_OPTIONAL_STAGE`, còn runtime/snapshot legacy bỏ qua flag an toàn. Ngoại lệ duy nhất: `completion.requiredStageIds` explicit chỉ định stage → đếm `required:true` bên trong stage đó (author explicit override).
+
+**Activity id uniqueness** (chốt 2026-10-16): activity id phải unique **toàn snapshot** (runtime index theo id đơn, collision cross-stage sẽ shadow ngầm). Publish-time: `DUPLICATE_ID` → `422 DRAFT_SCHEMA_INVALID`; runtime hand-edited snapshot: `SnapshotCorruptException`.
+
+**Completion evaluator**: AND-combination của `requireAllRequiredStages`, `requiredStageIds`, `minScore`; vắng config → `DEFAULT_ALL_REQUIRED`. Reason ưu tiên `ALL_REQUIRED_STAGES` → `REQUIRED_STAGE_IDS` → `MIN_SCORE` → `DEFAULT_ALL_REQUIRED`; thất bại → `NOT_COMPLETE`. **Config rỗng/không-clause (đã chốt 2026-10-16 sau P1 review):** object `completion` không chứa clause nào được kích hoạt (`{}`, hoặc chỉ `requireAllRequiredStages:false` + `requiredStageIds:[]` + `minScore:null`) được evaluator coi như **vắng mặt** → `DEFAULT_ALL_REQUIRED`, KHÔNG được trả `complete=true` sớm (trước fix, `completion:{}` complete ngay với 0 activity). Phía authoring: `DraftValidator` reject `completion:{}` ở PUBLISH (`EMPTY_COMPLETION` → 422) để authoring intent tường minh; SAVE vẫn tolerant. Snapshot legacy đã publish trước siết vẫn an toàn nhờ fallback runtime.
+
+~~**MVP limits đã ghi nhận**~~ *(lịch sử — ghi trước TASK-0012, KHÔNG còn mô tả hiện trạng)*: lúc đó idempotency chỉ chấp nhận + log header, `complete` chỉ trả verdict. **Hiện trạng (TASK-0012 đã chốt):** idempotency persist trên `idempotency_records` (scope `user+operation+key`, TTL 24h), `complete` flip `COMPLETED` + ghi `lesson_results` atomically trong một transaction với `alreadyCompleted` idempotent. **Vẫn chưa có:** reward/EXP thật (`reward_transactions` chỉ là schema/ledger, chưa có grant logic tích hợp vào `complete`), dashboard/resume đa attempt vẫn giới hạn một IN_PROGRESS attempt per (user, lesson).
+
+### TASK-0012 — attempt lifecycle, resume, idempotency & completion (đã chốt 2026-10-16)
+
+**Resume scope = lesson, không phải version.** `POST /lessons/{id}/attempts` tra `learner_attempts` IN_PROGRESS join `lesson_versions.lesson_id` trước: có → trả cùng attempt `resumed=true` (pin version cũ, progress giữ nguyên); không có → validate `PUBLISHED` + pin `current_version_id` mới. Vậy attempt v1 sống sót republish v2 mà không phá version pinning; server không bao giờ tự thay attempt đang chạy.
+
+**Cross-version start race → `pg_advisory_xact_lock` (đã chốt 2026-10-16 sau review).** Partial unique index chỉ phủ `(user_id, lesson_version_id)` — hai start concurrent mà republish rơi vào giữa check+insert có thể tạo 2 IN_PROGRESS attempt (mỗi cái pin một version) cho cùng (user, lesson). Fix: `pg_advisory_xact_lock(hashtextextended(userId|lessonId))` ở đầu transaction start — serialize check+insert cho cặp (user, lesson) mà không chặn publish hay user khác; version pinning giữ nguyên (attempt pin `current_version_id` đọc được dưới lock). IT deterministic `CrossVersionStartRaceIT` chứng minh cả 2 kịch bản (republish giữa hai start tuần tự; 4 thread start + republish mid-race) đều hội tụ về đúng 1 attempt.
+
+**Persistent idempotency** trên `idempotency_records`, scope `(user_id, operation, idempotency_key)`; `operation` ∈ `SUBMIT_ACTIVITY` | `COMPLETE_ATTEMPT`, `request_hash` = SHA-256(`attemptId|activityId|canonical(answerJson)`) cho submit (canonical = sorted-field JSON — cùng payload khác thứ tự field trùng hash), `attemptId` cho complete. `submit()`/`complete()` lock `learner_attempts` `PESSIMISTIC_WRITE` **trước** khi tra idempotency → duplicate concurrent block trên row lock rồi thấy committed response (không thể double-write). Claim row `saveAndFlush` + response lưu `response_json`/`http_status=200` commit **cùng transaction** với `activity_attempts`/state — business error rollback luôn claim, key không bị burn. Expired (TTL `app.learning.idempotency-ttl`, default 24h) → delete + reclaim. Không dùng in-memory cache cho correctness.
+
+**Completion server-authoritative.** `complete()`: lock → nếu `COMPLETED` trả stored verdict `alreadyCompleted=true` (idempotent repeat); nếu không `IN_PROGRESS` → `409 ATTEMPT_NOT_IN_PROGRESS`; `completionEvaluator` `!complete` → `409 ATTEMPT_NOT_COMPLETE` + `details`; else `markCompleted` + `lesson_results` row (unique per attempt) cùng tx. `score` là **completion percentage** `completedRequired*100/totalRequired`, HALF_UP 2 decimals (0 khi totalRequired=0) — **không phải assessment score**: required activity đếm completed kể cả khi retry-exhausted trên đáp án sai (quy tắc TASK-0011). Submit-on-`COMPLETED` → `409 ATTEMPT_ALREADY_COMPLETED`; start-after-complete → attempt mới pin version hiện tại.
+
+**Progress/history APIs (owner-only).** `GET /attempts/{id}/result` (404 `RESULT_NOT_FOUND` trước khi complete), `GET /me/attempts?status&page&size` (PageResponse, `size≤50`, `AttemptSummaryResponse` với cursor+progress cho resume), `GET /me/progress` (`inProgress[]` + `completedCount` — mobile resume surface). `lessonId` resolve qua `lesson_versions`; snapshot corrupt → progress `0/0` thay vì 500. `JwtSubjectExtractor` chung: malformed `sub` → `AuthenticationFailedException` → `401` trên mọi learner endpoint (không 500, không bypass ownership).
+
+**Vẫn mở**: retention policy 24h là config mặc định (PO xác nhận nếu cần khác); `result_json` shape `{attemptId,lessonVersionId,reason,score,completedRequired,totalRequired,detail}` chưa có field reward/EXP; **reward grant thật chưa được code** — `reward_transactions` chỉ là schema (V4), không có service/endpoint nào ghi row (xem `docs/MAP_COLLECTION_REWARDS_ISLAND.md`).
+
+### GAME-04 — event milestones + dossier unlock trong `doComplete()` (đã chốt 2026-10-25)
+
+`LearnerAttemptService.doComplete()` chạy `EventMilestoneRecorder.recordIfEarned(userId, eventId)` **bên trong cùng transaction** với flip `COMPLETED` + `lesson_results` + first-completion rewards + item unlocks (sau `rewardGrants.grantFirstCompletion` và `itemUnlocks.evaluateAfterLessonCompletion`). Ngoại lệ bất kỳ trong recorder rollback cả completion — không có trạng thái "lesson xong nhưng milestone/dossier mất" (Scenario J). `eventId` resolve từ `Lesson.eventId` của pinned version; lesson không gắn event → bỏ qua lặng lẽ.
+
+Concurrency: `pg_advisory_xact_lock(hashtextextended(userId|eventId))` serialize evaluation theo cặp (user, event) — hai completion song song của hai required lesson cuối không mất milestone; loser re-evaluate trên trạng thái winner đã commit, `insertIgnore` PK `(user_id,event_id,milestone)`/`(user_id,dossier_id)` chặn duplicate. Event không có policy `PUBLISHED` → `NOT_CONFIGURED`, không ghi gì.
+
+Reconcile-on-read: `EventProgressQueryService.progressOf` gọi cùng `recordIfEarned` khi `EVENT_COMPLETED` chưa tồn tại — completed attempts trước khi policy được publish vẫn nhận milestone lần đọc đầu (idempotent, không backfill thủ công). Response `CompleteAttemptResponse` mang `newlyUnlockedDossiers` (additive) cho cue một lần; replay/alreadyCompleted trả rỗng.
+
+### TASK-0020 — Learning Flow 2.0 (đã chốt 2026-10-24)
+
+Mục tiêu: meaningful learning + automatic assessment — kết luận có cấu trúc chấm được, không còn bắt buộc free-text CER; evidence/reasoning chấm theo nội dung thay vì chỉ đếm; output giữa các activity nối mạch; progress tách khỏi knowledge score.
+
+**`CER_CHOICE` (stage `CONCLUSION`).** Structured Claim→Evidence→Reasoning: learner chọn `claimId` từ `config.claims[]`, `reasoningId` từ `config.reasoningOptions[]`, và `evidenceIds[]` từ `config.evidenceOptions[]` ∪ snapshot evidence (để `priorEvidenceSource` truyền qua). Answer keys server-only dạng **coherent combinations**: `config.acceptedCombos[]`, mỗi phần tử `{claimId, evidenceIds[], reasoningId}` — đúng hoàn toàn chỉ khi cả ba phần chọn khớp chính xác một combo (evidence là set-equality, không phải subset). Điểm per-part `score = partsCorrect/3` (0, 1/3, 2/3) — partial match **không bao giờ promote** thành correct. `maxAttempts` (default 3) hết → `exhausted:true`, activity vẫn tính completed-cho-progress nhưng `correct=false`. Publish bắt buộc: ≥1 combo, mọi `claimId`/`reasoningId`/`evidenceIds` refs ⊆ option ids tương ứng (evidence phải thuộc event), `feedback` activity-level có `COMPLETED`+`INCORRECT`; `minCorrect` bị reject ở publish (`INVALID_CONFIG` — đã retire, không cho promote partial). **Legacy compat:** snapshot cũ chỉ có `acceptedClaims`/`acceptedEvidenceIds`/`acceptedReasoningIds` → server expand cartesian product thành combos (đúng khi mỗi phần thuộc accepted set tương ứng — bảo toàn semantics cũ), publish vẫn chấp nhận flat keys khi không có `acceptedCombos`. `config.priorEvidenceSource` trỏ tới EVIDENCE_SELECT activity upstream: server đọc `priorOutputs[source].selectedEvidenceIds` làm pool bổ sung khả chọn; Flutter prefill + cho learner thêm/bớt trong pool đó. Legacy free-text `CER` giữ nguyên semantics — flow mới không bắt buộc nó.
+
+**Graded mode opt-in `config.graded:true` — bounded partial scoring (F1).**
+- `EVIDENCE_SELECT`: publish yêu cầu `acceptedEvidenceIds` ⊆ `visibleEvidenceIds` (và refs tồn tại trong event); runtime exact-set → `COMPLETED`, ngược lại `PARTIAL`/`INCORRECT` với **`score = F1 = 2·hits/(|submitted|+|accepted|)`** — select-all-kèm-bừa < 1.0 nên không farm được full credit.
+- `REASONING_CONNECT`: publish yêu cầu `expectedRelations` hoặc `acceptedRelationSets`; mỗi relation `{from,to,relation}` tham chiếu `nodes[].id` + `allowedRelations`; runtime exact-set match với **bất kỳ** accepted set nào → `COMPLETED`, ngược lại partial với **`score = max F1`** — F1 tính độc lập cho **mỗi** accepted set (`2·hits/(|submitted|+|accepted|)`) rồi lấy tối đa, **không** chọn set theo hit count (tránh khớp nhiều trên set lớn nhưng F1 thấp hơn một set nhỏ exact). Output chỉ counts/score — không echo keys.
+- Cả hai: `maxAttempts` (default 1) hết → `exhausted:true`, activity vẫn tính completed để flow đi tiếp — không soft-lock.
+
+**Resubmit completion mark hai chiều (§P0 round-2).** `doSubmit` ghi `recordOutput` rồi `markCompleted` khi `completed=true`, **`removeCompleted` khi `completed=false`** — resubmit graded incomplete (correct → wrong/partial trước khi hết `maxAttempts`) phải gỡ dấu completed cũ; giữ phân biệt incorrect-but-exhausted (`completed=true`, vẫn advance) vs incomplete (`completed=false`, giữ retry). `completedActivityIds` phản ánh evaluation gần nhất — không để stale mark chỉ về output đã bị ghi đè.
+
+**Output continuity.** `LearnerProjectionService.project/projectActivity(snapshot|activity, priorOutputs)` inject `config.priorOutputs` vào learner payload — outputs của các activity đã submit, deep-stripped `LEARNER_HIDDEN_KEYS` lần nữa (defense-in-depth), không mutate snapshot gốc. Renderer downstream (CER_CHOICE, VERIFICATION…) đọc prior selections trực tiếp từ config.
+
+**VERIFICATION consumes persisted evidence (§P0).** `VerificationHandler` lấy tập bằng chứng để chấm từ `config.evidenceSource` → `priorOutputs[source].selectedEvidenceIds` — server-side persisted output là authoritative, client-submitted evidence ids bị ignore hoàn toàn (handler không đọc `sub.answer()`). Source thiếu/malformed → tập rỗng → `PARTIAL`. Snapshot legacy không khai báo `evidenceSource` → fallback `hypothesis.evidenceIds` như cũ. Publish validation (`DraftValidator.validateActivitySourceRefs`): `evidenceSource`/`priorEvidenceSource` phải (a) tồn tại trong draft (`UNKNOWN_ACTIVITY_ID`), (b) là activity `EVIDENCE_SELECT` (`INVALID_CONFIG`), (c) đứng trước consumer trong thứ tự thực thi — cùng stage thì source phải khai báo **trước** consumer trong `activities[]` (siblings chạy theo thứ tự), khác stage thì stage của consumer phải reach được stage của source qua **forward `nextStageIds`**. Revision hops (`onPartial`/`onContradicted`) KHÔNG được tính là bảo chứng availability — hop là navigation quay lại, không chứng minh output đã tồn tại trước khi consumer chạy (`UNREACHABLE_SOURCE`). Admin dropdown chỉ list EVIDENCE_SELECT candidates để tránh gõ sai id, khớp backend validator.
+
+**Transitive dependent invalidation.** Re-submit một activity xóa output+completed của mọi activity nằm downstream theo **dependency graph**: cạnh = explicit source refs (`evidenceSource`/`priorEvidenceSource`) + lan truyền theo thứ tự flow qua pseudo-boundary `"stage:{id}"` (siblings đứng sau trong cùng stage + mọi activity trong các stage kế tiếp, đệ quy). BFS visited-guarded, bảo toàn chính activity vừa submit. **Revision hops (`onPartial`/`onContradicted`) KHÔNG phải data-dependency edge** — hop là navigation, không phải "X consumes output của tôi"; đưa hop vào tạo cycle (ví dụ `hc → do → vf1 → hc` trong Bạch Đằng) khiến resubmit downstream void chính hypothesis/verification mà nó phụ thuộc. Thiết kế conservative: mọi thứ đã chạy sau activity bị revise theo forward-order được coi là downstream (không chứng minh được nó không quan sát output cũ qua priorOutputs).
+
+**Dual score.** `result_json` của attempt thêm `knowledgeScore` (0-100): trung bình per-activity correctness **chỉ trên các activity có chấm điểm có nghĩa** — `isGradedActivity` = contract-graded types (`MULTIPLE_CHOICE`, `MATCHING`, `DRAG_ORDER`, `CER_CHOICE` — emit `correct`) **hoặc** `config.graded:true` (graded `EVIDENCE_SELECT`, `REASONING_CONNECT`). Graded: `output.score` (0..1) khi có, else `output.correct` (1/0); exhausted-incorrect đóng góp partial score, không free credit; activity ungraded/completion-only **không đếm** — READ/VIEW_IMAGE/EXPLORE_MAP/HYPOTHESIS_CHOICE/REFLECTION_PROMPT, legacy CER (length-only), count-only/syntax-only legacy, và `VERIFICATION` (phát `verification` verdict SUPPORTED/PARTIAL/CONTRADICTED — đánh giá hypothesis, không phải learner correctness) đều loại. `score` vẫn là completion percentage cũ. `REFLECTION` stage (`required:false`) không tính completion/totals/knowledge — optional ungraded.
+
+**Contract gap fix.** `DraftSchema.ACTIVITY_KEYS` giờ chấp nhận `onPartial`/`onContradicted` — StageTransitionResolver đã đọc hai key này (revise-hop targets) từ trước nhưng publish validator từng reject `UNKNOWN_FIELD`.
+
+**Remediation & no-soft-lock (round-3, đã chốt 2026-10-24).** Hai cơ chế giới hạn hai phía của vòng lặp Evidence↔Verification:
+
+- **`config.remedialAttempts` trên EVIDENCE_SELECT** — ngân sách retry bổ sung chỉ mở khi scored `maxAttempts` đã cạn (output `exhausted:true`) VÀ learner được route lại (cursor đứng ở activity). Lượt remedial mang marker `remedial:true` để audit; chấm vẫn exact-match/F1 như thường — không free credit, không refill vô hạn. Lượt remedial cuối (`attemptNo == maxAttempts+remedialAttempts`) luôn `completed-for-progress` — kể cả sai — để cursor không kẹt mãi ở một activity.
+- **Hard cap vượt ngân sách (final, policy B)** — `attemptNo > maxAttempts+remedialAttempts` thì submission vẫn được chấp nhận (không 409-soft-lock) nhưng **không được nâng correctness**: output giữ `correct`/`score`/`selectedEvidenceIds` của lần ghi nhận cuối, `budgetExhausted:true`, `exhausted:true`, `completed=true` — đáp án đúng gửi sau khi cạn cả hai ngân sách không đổi verdict đã chốt và không làm downstream thấy một bằng chứng "đúng" mà budget không trả được.
+- **`config.maxAttempts` trên VERIFICATION** — giới hạn số lần verify (default 0 = unbounded, giữ ngữ nghĩa legacy). Khi budget cạn ở verdict non-SUPPORTED, activity `completed-for-progress` + `exhausted:true` — verdict **không bao giờ** bị promote thành SUPPORTED (bằng chứng sai vẫn là sai), nhưng lesson đi tới trạng thái kết thúc có chủ đích thay vì lặp vô hạn.
+- **Resolver**: rule (-1) remedial-stay đặt TRƯỚC rule (0); rule (b) revise-hop bị chặn khi `exhausted:true` (xem trên). `isRemedialRetry` đọc budget từ `attemptCounts` ledger.
+- **`UNGUARANTEED_SOURCE` (DraftValidator, publish-only)**: consumer `required:true` (VERIFICATION/CER_CHOICE) mà source EVIDENCE_SELECT nằm trong stage `required:false` hoặc chính activity source `required:false` → `422` — required consumer không được phụ thuộc vào nguồn có thể bị skip. Chạy sau `UNREACHABLE_SOURCE`. Optional consumer giữ contract lỏng cũ.
+- **Ledger `attemptCounts`** trong `AttemptState` (xem trên) — không có nó, invalidation sẽ refund budget và `maxAttempts` trên VERIFICATION vô nghĩa.
+
+**Hidden keys.** `LEARNER_HIDDEN_KEYS` đã bao gồm `acceptedClaims`/`acceptedEvidenceIds`/`acceptedReasoningIds`/`acceptedCombos`/`expectedRelations`/`acceptedRelationSets` (+`acceptedOptions`) — CER_CHOICE và graded-mode keys không bao giờ tới learner DTO; `injectPriorOutputs` re-strip outputs trước khi inject nên handler output cũng không lộ keys.
+
+**Fixtures.** `dau-viet-backend/src/test/resources/lessons/bach-dang-938-v2.draft.json` — flow 8-stage tham chiếu dùng CER_CHOICE + graded EVIDENCE_SELECT/REASONING_CONNECT; `hai-ba-trung-40.draft.json` — fixture thứ hai chứng minh engine tái sử dụng không event-specific branch.
+
+## 14. Open decisions
 
 - 2 template MVP: `EVENT_INVESTIGATION`, `DECISION_ANALYSIS` là đề xuất từ BA mới, cần PO duyệt.
-- CER grading: structure-based/manual rubric/preset choices trong MVP; free text AI grading không thuộc must.
+- ~~CER grading: structure-based/manual rubric/preset choices~~ — **ĐÃ CHỐT TASK-0020**: preset choices (`CER_CHOICE`) với server-side answer keys + per-part grading; free-text `CER` legacy giữ structure-based (độ dài tối thiểu + evidence filter); AI grading vẫn không thuộc must.
 - Tỷ trọng điểm/retry/hint, số lần học lại, reward repeat và unlock conditions phải có product decision.
-- Reflection optional vs required từng template; Story/Result là stage hay presentation sau hoàn thành?
+- ~~Reflection optional vs required từng template~~ — **ĐÃ CHỐT TASK-0020**: REFLECTION stage `required:false` = optional + ungraded, không tính completion/totals/knowledgeScore. Story/Result là stage hay presentation sau hoàn thành vẫn mở.
 - Island/energy/shop là metagame của mockup, chưa ép vào core engine.
+- ~~`stage.required` vs `activity.required` semantics~~ — **ĐÃ CHỐT 2026-10-16**: `stage.required=false` nghĩa là toàn bộ stage + activities của nó là optional (BA: Reflection optional, Result không bắt buộc là stage). `requiredActivities()` chỉ trả activities khi stage `required:true` → progress `totalRequired`, default completion và cursor transition đều bỏ qua optional stage; `requiredStageIds` explicit vẫn override (đếm `required:true` bên trong stage được chỉ định). Publish reject shape mâu thuẫn `REQUIRED_IN_OPTIONAL_STAGE`; snapshot legacy vẫn an toàn nhờ runtime fallback.
+- **Evidence metadata `relevance` / `reliability` / `role` (`core` | `distractor`) & tự đánh giá nguồn (BA §3.3, §8.3, §10)** — hiện `distractor` vẫn được suy từ `visibleEvidenceIds \ acceptedEvidenceIds` ở cấp activity config thay vì là thuộc tính trên bảng `evidences`, và chưa có bước học viên tự chấm mức độ liên quan/độ tin cậy của từng nguồn. Candidate Hướng B (cần Flyway migration + Admin labeling + handler scoring mới) — giữ ở backlog chờ PO chốt.
 
-## 14. Sources
+## 15. Sources
 
 - `Dau_Viet_BA_MVP_Learning_Framework.docx`: master stages, templates, ENG requirements, Admin authoring, sample lesson 938, gap Conclusion/Reflection.
 - `Functional_Requirements_Dau_Viet_MVP.docx`: activity types, 4 Dấu, progress, map và collection.

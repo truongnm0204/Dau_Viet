@@ -1,28 +1,114 @@
 import 'package:go_router/go_router.dart';
+import '../core/api/api_config.dart';
+import '../features/auth/data/auth_state.dart';
 import '../features/auth/presentation/auth_screen.dart';
+import '../features/auth/presentation/register_screen.dart';
+import '../features/auth/presentation/forgot_password_screen.dart';
+import '../features/auth/presentation/otp_verification_screen.dart';
+import '../features/auth/presentation/reset_password_screen.dart';
 import '../features/auth/presentation/splash_screen.dart';
 import '../features/campaign/presentation/campaign_detail_screen.dart';
+import '../features/collection/presentation/collection_detail_screen.dart';
+import '../features/collection/presentation/collection_screen.dart';
+import '../features/collection/presentation/dossier_detail_screen.dart';
 import '../features/dashboard/presentation/learner_dashboard_screen.dart';
 import '../features/demo/presentation/theme_showcase_screen.dart';
+import '../features/learning/data/attempt_dtos.dart';
+import '../features/learning/data/learning_providers.dart';
 import '../features/learning/presentation/chronological_order_screen.dart';
+import '../features/learning_path/presentation/period_journey_screen.dart';
+import '../features/learning_path/presentation/period_selection_screen.dart';
 import '../features/learning/presentation/context_reader_screen.dart';
 import '../features/learning/presentation/cer_conclusion_screen.dart';
 import '../features/learning/presentation/hypothesis_verification_screen.dart';
+import '../features/learning/presentation/lesson_entry_screen.dart';
+import '../features/learning/presentation/lesson_player_screen.dart';
+import '../features/learning/presentation/lesson_result_screen.dart';
 import '../features/learning/presentation/matching_board_screen.dart';
 import '../features/learning/presentation/multiple_choice_quiz_screen.dart';
+import '../features/map/presentation/historical_map_screen.dart';
+import '../features/map/presentation/location_profile_screen.dart';
 import '../features/meta/presentation/energy_management_screen.dart';
-import '../features/meta/presentation/heritage_island_screen.dart';
+import '../features/onboarding/presentation/onboarding_screen.dart';
+import '../features/profile/presentation/profile_screen.dart';
+import '../features/island/presentation/island_screen.dart';
+import '../features/island/presentation/island_shop_screen.dart';
 import '../features/meta/presentation/inventory_screen.dart';
 import '../features/rewards/presentation/event_victory_screen.dart';
 import '../features/rewards/presentation/reward_claim_screen.dart';
 import '../features/rewards/presentation/warship_artifact_detail_screen.dart';
 import '../features/saban/presentation/battle_saban_screen.dart';
+import '../features/streak/presentation/learning_streak_screen.dart';
 import '../features/timeline/presentation/timeline_screen.dart';
 import '../features/traces/presentation/traces_hub_screen.dart';
+
+/// Đường đi học thật — real mode yêu cầu đăng nhập (guard chuyển về /auth).
+const _learningPrefixes = [
+  '/learning',
+  '/streak',
+  '/map',
+  '/collection',
+  '/energy',
+  '/timeline',
+  '/saban',
+  '/island',
+  '/journey',
+  '/heritage',
+];
+
+/// Màn demo-only (nội dung hard-code, không có backend thật): giữ trong
+/// USE_MOCK; real mode redirect về dashboard để không lộ dữ liệu bịa.
+/// Reward screens M-18/19/21 cần attemptId hợp lệ — real mode không có.
+/// Timeline/Sa Bàn đã được đồng bộ để mở được ở cả 2 chế độ.
+/// Đảo Di Sản (/island) và Túi Đồ (/inventory) là sở hữu/trang trí THẬT
+/// (nguồn /me/inventory) — KHÔNG gate ở đây, để learner mở được mọi lúc.
+const _demoOnlyPrefixes = [
+  '/rewards/victory',
+  '/rewards/claim',
+  '/rewards/artifact',
+];
 
 /// Bộ định tuyến toàn cục của Dấu Việt Mobile (go_router)
 final appRouter = GoRouter(
   initialLocation: '/',
+  refreshListenable: authRouterRefreshNotifier,
+  redirect: (context, state) {
+    // Đọc auth state qua container toàn cục (router tạo trước ProviderScope).
+    final container = appContainer;
+    if (container == null) return null;
+    final auth = container.read(authSessionProvider);
+    final loc = state.matchedLocation;
+
+    // Mock mode: guest hợp lệ → không chặn gì.
+    if (ApiConfig.useMock) return null;
+
+    // Đang restore phiên (splash) → giữ nguyên; splash tự điều hướng.
+    if (auth.status == AuthStatus.unknown) return null;
+
+    // Đã login mà vào /auth hoặc /register → về dashboard.
+    if (auth.status == AuthStatus.authenticated &&
+        (loc == '/auth' || loc == '/register')) {
+      return '/dashboard';
+    }
+
+    // Đã login mà vào màn phụ của auth flow → về dashboard.
+    if (auth.status == AuthStatus.authenticated &&
+        (loc == '/auth/otp' || loc == '/auth/forgot' || loc == '/auth/reset-password')) {
+      return '/dashboard';
+    }
+
+    // Real mode: màn nội dung demo-only không có dữ liệu thật → dashboard.
+    if (!ApiConfig.useMock && _demoOnlyPrefixes.any((p) => loc.startsWith(p))) {
+      return '/dashboard';
+    }
+
+    // Chưa login mà vào đường học thật → bắt đăng nhập.
+    final bool needsAuth = _learningPrefixes.any((p) => loc.startsWith(p));
+    if (needsAuth && auth.status != AuthStatus.authenticated) {
+      return '/auth';
+    }
+    return null;
+  },
   routes: [
     // M-01: Splash Screen Thương hiệu
     GoRoute(
@@ -38,6 +124,58 @@ final appRouter = GoRouter(
       builder: (context, state) => const AuthScreen(),
     ),
 
+    // P0-03: Đăng ký tài khoản learner mới
+    GoRoute(
+      path: '/register',
+      name: 'register',
+      builder: (context, state) => const RegisterScreen(),
+    ),
+
+    // Issue #34: quên mật khẩu — bước 1 (email → gửi OTP).
+    GoRoute(
+      path: '/auth/forgot',
+      name: 'forgot-password',
+      builder: (context, state) => const ForgotPasswordScreen(),
+    ),
+
+    // Issue #34: nhập mã OTP 6 số (đăng ký | quên mật khẩu).
+    GoRoute(
+      path: '/auth/otp',
+      name: 'otp-verify',
+      builder: (context, state) {
+        final args = state.extra as OtpFlowArgs?;
+        if (args == null) return const AuthScreen();
+        return OtpVerificationScreen(args: args);
+      },
+    ),
+
+    // Issue #34: quên mật khẩu — bước 2 (OTP + mật khẩu mới).
+    GoRoute(
+      path: '/auth/reset-password',
+      name: 'reset-password',
+      builder: (context, state) {
+        final args = state.extra as ({String email, String otpCode})?;
+        if (args == null) return const ForgotPasswordScreen();
+        return ResetPasswordScreen(email: args.email, otpCode: args.otpCode);
+      },
+    ),
+
+    // P1-02: Onboarding 3 bước — chỉ hiện lần đầu (splash điều hướng).
+    GoRoute(
+      path: '/onboarding',
+      name: 'onboarding',
+      builder: (context, state) => OnboardingScreen(
+        destination: state.uri.queryParameters['next'] ?? '/auth',
+      ),
+    ),
+
+    // P0-02: Hồ sơ cá nhân — tab 3 của bottom nav chuẩn
+    GoRoute(
+      path: '/profile',
+      name: 'profile',
+      builder: (context, state) => const ProfileScreen(),
+    ),
+
     // M-03: Bàn Học Tập Người Học (Dashboard)
     GoRoute(
       path: '/dashboard',
@@ -50,6 +188,51 @@ final appRouter = GoRouter(
       path: '/timeline',
       name: 'timeline',
       builder: (context, state) => const TimelineScreen(),
+    ),
+
+    // Issue #42: `/journey` là LUỒNG HỌC CHÍNH — cây ĐẠI THỜI KỲ →
+    // THỜI KỲ → Sự kiện → Bài học. `/map` quay về đúng vai trò Bản đồ
+    // Dấu Ấn (di tích mở khoá sau bài học), không còn là trục học.
+    GoRoute(
+      path: '/journey',
+      name: 'journey',
+      builder: (context, state) => const PeriodSelectionScreen(),
+      routes: [
+        GoRoute(
+          path: ':periodCode',
+          name: 'period_journey',
+          builder: (context, state) => PeriodJourneyScreen(
+            periodCode: state.pathParameters['periodCode'] ?? '',
+          ),
+        ),
+      ],
+    ),
+
+    // A3 / E4 / E5: Hồ sơ địa điểm di sản (`/heritage/:locationId`)
+    GoRoute(
+      path: '/heritage/:locationId',
+      name: 'heritage_location',
+      builder: (context, state) => LocationProfileScreen(
+        locationId: state.pathParameters['locationId'] ?? '',
+      ),
+    ),
+
+    // TASK-0021 / Issue #42: Bản Đồ Dấu Ấn — chỉ di tích mở khoá.
+    GoRoute(
+      path: '/map',
+      name: 'historical_map',
+      builder: (context, state) {
+        final view = state.uri.queryParameters['view'];
+        final eventId = state.uri.queryParameters['eventId'];
+        final locationId = state.uri.queryParameters['locationId'];
+        return HistoricalMapScreen(
+          initialMode: view == 'timeline'
+              ? ExploreViewMode.timeline
+              : ExploreViewMode.map,
+          initialEventId: eventId,
+          initialLocationId: locationId,
+        );
+      },
     ),
 
     // M-06: Sa Bàn Chiến Thuật & Bản Đồ Sông Bạch Đằng
@@ -121,12 +304,37 @@ final appRouter = GoRouter(
       builder: (context, state) => const MultipleChoiceQuizScreen(),
     ),
 
+    // Learning journey thật (backend-connected)
+    GoRoute(
+      path: '/learning/lesson/:lessonId',
+      name: 'lesson_entry',
+      builder: (context, state) =>
+          LessonEntryScreen(lessonId: state.pathParameters['lessonId']!),
+    ),
+    GoRoute(
+      path: '/learning/attempt/:attemptId',
+      name: 'lesson_player',
+      builder: (context, state) =>
+          LessonPlayerScreen(attemptId: state.pathParameters['attemptId']!),
+    ),
+    GoRoute(
+      path: '/learning/result/:attemptId',
+      name: 'lesson_result',
+      builder: (context, state) => LessonResultScreen(
+        attemptId: state.pathParameters['attemptId']!,
+        initialResult: state.extra is LessonResultDto
+            ? state.extra as LessonResultDto
+            : null,
+      ),
+    ),
+
     // M-18: Khải Hoàn Chiến Dịch & Tổng Kết Điểm (Event Victory)
     GoRoute(
       path: '/rewards/victory',
       name: 'event_victory',
       builder: (context, state) {
-        final eventId = state.uri.queryParameters['eventId'] ?? 'evt_bach_dang_938';
+        final eventId =
+            state.uri.queryParameters['eventId'] ?? 'evt_bach_dang_938';
         return EventVictoryScreen(eventId: eventId);
       },
     ),
@@ -143,16 +351,46 @@ final appRouter = GoRouter(
       path: '/rewards/artifact/:artifactId',
       name: 'artifact_detail',
       builder: (context, state) {
-        final artifactId = state.pathParameters['artifactId'] ?? 'art_thuyen_chien_938';
+        final artifactId =
+            state.pathParameters['artifactId'] ?? 'art_thuyen_chien_938';
         return WarshipArtifactDetailScreen(artifactId: artifactId);
       },
+    ),
+
+    // TASK-0022: Bộ Sưu Tập bằng chứng lịch sử đã thu thập
+    GoRoute(
+      path: '/collection',
+      name: 'collection',
+      builder: (context, state) => const CollectionScreen(),
+    ),
+    // GAME-04: dossier route phải đứng TRƯỚC /collection/:evidenceId —
+    // GoRouter match theo thứ tự, ':evidenceId' sẽ nuốt 'dossiers'.
+    GoRoute(
+      path: '/collection/dossiers/:dossierId',
+      name: 'dossier_detail',
+      builder: (context, state) =>
+          DossierDetailScreen(dossierId: state.pathParameters['dossierId']!),
+    ),
+    GoRoute(
+      path: '/collection/:evidenceId',
+      name: 'collection_detail',
+      builder: (context, state) => CollectionDetailScreen(
+        evidenceId: state.pathParameters['evidenceId']!,
+      ),
     ),
 
     // M-22: Bản Đồ Đảo Di Sản Cá Nhân 2.5D (Heritage Island)
     GoRoute(
       path: '/island',
       name: 'heritage_island',
-      builder: (context, state) => const HeritageIslandScreen(),
+      builder: (context, state) => const IslandScreen(),
+      routes: [
+        GoRoute(
+          path: 'shop',
+          name: 'island_shop',
+          builder: (context, state) => const IslandShopScreen(),
+        ),
+      ],
     ),
 
     // M-27: Túi Đồ & Kho Quản Lý Cổ Vật Sở Hữu (Inventory)
@@ -167,6 +405,13 @@ final appRouter = GoRouter(
       path: '/energy',
       name: 'energy_management',
       builder: (context, state) => const EnergyManagementScreen(),
+    ),
+
+    // STREAK-01: Chi Tiết Chuỗi Ngày Học — Ngọn Lửa Hào Khí
+    GoRoute(
+      path: '/streak',
+      name: 'learning_streak',
+      builder: (context, state) => const LearningStreakScreen(),
     ),
 
     // Demo Showcase Theme

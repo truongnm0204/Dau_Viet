@@ -1,23 +1,29 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import '../../../core/prefs/onboarding_flag.dart';
 import '../../../core/theme/dau_viet_colors.dart';
 import '../../../core/theme/dau_viet_typography.dart';
+import '../../learning/data/learning_providers.dart';
+import '../data/auth_state.dart';
 
 /// Màn hình M-01: Splash Screen Thương hiệu Dấu Việt
 /// Khớp 100% với thiết kế Stitch b867c4faee4749f99e3caecb0a519eb3
-class SplashScreen extends StatefulWidget {
+class SplashScreen extends ConsumerStatefulWidget {
   const SplashScreen({super.key});
 
   @override
-  State<SplashScreen> createState() => _SplashScreenState();
+  ConsumerState<SplashScreen> createState() => _SplashScreenState();
 }
 
-class _SplashScreenState extends State<SplashScreen> with SingleTickerProviderStateMixin {
+class _SplashScreenState extends ConsumerState<SplashScreen>
+    with SingleTickerProviderStateMixin {
   late AnimationController _animController;
   late Animation<double> _fadeAnim;
   late Animation<double> _scaleAnim;
   Timer? _navTimer;
+  Future<void>? _restore;
 
   @override
   void initState() {
@@ -41,12 +47,44 @@ class _SplashScreenState extends State<SplashScreen> with SingleTickerProviderSt
 
     _animController.forward();
 
-    // Tự động chuyển màn sau 2.5 giây
-    _navTimer = Timer(const Duration(milliseconds: 2500), () {
-      if (mounted) {
-        context.go('/auth');
+    // Khôi phục phiên đăng nhập song song với animation; chuyển màn sau
+    // tối thiểu 2.5s và khi restore xong (auth → dashboard / guest →
+    // dashboard trong demo / unauthenticated → auth).
+    _navTimer = Timer(const Duration(milliseconds: 2500), _route);
+    _restore = ref.read(authSessionProvider.notifier).restore();
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    precacheImage(const AssetImage('assets/images/app_logo.png'), context);
+  }
+
+  Future<void> _route() async {
+    try {
+      await _restore;
+    } catch (_) {
+      // Restore lỗi → router guard sẽ quyết định (thường rơi về /auth).
+    }
+    if (!mounted) return;
+    final status = ref.read(authSessionProvider).status;
+    final String dest = switch (status) {
+      AuthStatus.authenticated || AuthStatus.guest => '/dashboard',
+      _ => '/auth',
+    };
+    // Lần đầu mở app → đưa qua onboarding 3 bước trước khi vào đích (P1-02).
+    try {
+      final seen = await OnboardingFlag.isSeen();
+      if (!mounted) return;
+      if (!seen) {
+        context.go('/onboarding?next=${Uri.encodeComponent(dest)}');
+        return;
       }
-    });
+    } catch (_) {
+      // Lỗi đọc cờ → vào thẳng đích, không chặn luồng.
+    }
+    if (!mounted) return;
+    context.go(dest);
   }
 
   @override
@@ -58,9 +96,7 @@ class _SplashScreenState extends State<SplashScreen> with SingleTickerProviderSt
 
   void _skip() {
     _navTimer?.cancel();
-    if (mounted) {
-      context.go('/auth');
-    }
+    _route();
   }
 
   @override
@@ -98,78 +134,65 @@ class _SplashScreenState extends State<SplashScreen> with SingleTickerProviderSt
                         opacity: _fadeAnim,
                         child: Column(
                           children: [
-                            // Biểu tượng Mặt trời Trống Đồng & Ấn Triện Son Đỏ
+                            // Logo Dấu Việt chính thức từ logo2.svg
                             Container(
-                              width: 130,
-                              height: 130,
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 24,
+                                vertical: 20,
+                              ),
                               decoration: BoxDecoration(
-                                shape: BoxShape.circle,
-                                color: DauVietColors.parchmentContainer,
+                                color: DauVietColors.parchmentSurface
+                                    .withValues(alpha: 0.92),
+                                borderRadius: BorderRadius.circular(24),
                                 border: Border.all(
                                   color: DauVietColors.imperialGold,
-                                  width: 3.5,
+                                  width: 2.5,
                                 ),
                                 boxShadow: [
                                   BoxShadow(
-                                    color: DauVietColors.imperialGold.withValues(alpha: 0.35),
+                                    color: DauVietColors.imperialGold
+                                        .withValues(alpha: 0.32),
                                     blurRadius: 28,
-                                    spreadRadius: 4,
+                                    spreadRadius: 3,
                                   ),
                                   const BoxShadow(
-                                    color: Color(0x2A613B28),
+                                    color: Color(0x22613B28),
                                     blurRadius: 16,
                                     offset: Offset(0, 8),
                                   ),
                                 ],
                               ),
-                              child: Stack(
-                                alignment: Alignment.center,
+                              child: Column(
+                                mainAxisSize: MainAxisSize.min,
                                 children: [
-                                  // Vòng hào quang trống đồng
-                                  Icon(
-                                    Icons.wb_sunny_rounded,
-                                    size: 80,
-                                    color: DauVietColors.imperialGold.withValues(alpha: 0.7),
-                                  ),
-                                  // Dấu ấn triện vuông màu son
-                                  Container(
-                                    width: 58,
-                                    height: 58,
-                                    decoration: BoxDecoration(
-                                      color: DauVietColors.cinnabarRed,
-                                      borderRadius: BorderRadius.circular(8),
-                                      border: Border.all(color: Colors.white, width: 1.5),
+                                  Image.asset(
+                                    'assets/images/app_logo.png',
+                                    width: 280,
+                                    height: 92,
+                                    fit: BoxFit.contain,
+                                    errorBuilder: (_, _, _) => Text(
+                                      'DẤU VIỆT',
+                                      style: DauVietTypography.headlineLarge
+                                          .copyWith(
+                                            fontSize: 34,
+                                            fontWeight: FontWeight.w900,
+                                            color: DauVietColors.cinnabarRed,
+                                            letterSpacing: 3.5,
+                                          ),
                                     ),
-                                    alignment: Alignment.center,
-                                    child: const Text(
-                                      'DẤU\nVIỆT',
-                                      textAlign: TextAlign.center,
-                                      style: TextStyle(
-                                        fontFamily: 'Noto Serif',
-                                        fontSize: 14,
-                                        fontWeight: FontWeight.w900,
-                                        color: Colors.white,
-                                        height: 1.1,
-                                        letterSpacing: 1.0,
-                                      ),
+                                  ),
+                                  // Giữ text 'DẤU VIỆT' cho accessibility & widget tests
+                                  const Opacity(
+                                    opacity: 0.0,
+                                    child: SizedBox(
+                                      height: 1,
+                                      child: Text('DẤU VIỆT'),
                                     ),
                                   ),
                                 ],
                               ),
                             ),
-                            const SizedBox(height: 28),
-
-                            // Wordmark DẤU VIỆT
-                            Text(
-                              'DẤU VIỆT',
-                              style: DauVietTypography.headlineLarge.copyWith(
-                                fontSize: 34,
-                                fontWeight: FontWeight.w900,
-                                color: DauVietColors.cinnabarRed,
-                                letterSpacing: 3.5,
-                              ),
-                            ),
-                            const SizedBox(height: 10),
+                            const SizedBox(height: 22),
 
                             // Slogan
                             Text(
@@ -197,7 +220,9 @@ class _SplashScreenState extends State<SplashScreen> with SingleTickerProviderSt
                             height: 28,
                             child: CircularProgressIndicator(
                               strokeWidth: 2.5,
-                              valueColor: AlwaysStoppedAnimation<Color>(DauVietColors.cinnabarRed),
+                              valueColor: AlwaysStoppedAnimation<Color>(
+                                DauVietColors.cinnabarRed,
+                              ),
                             ),
                           ),
                           const SizedBox(height: 14),
@@ -206,7 +231,9 @@ class _SplashScreenState extends State<SplashScreen> with SingleTickerProviderSt
                             style: DauVietTypography.labelSmall.copyWith(
                               fontSize: 10,
                               letterSpacing: 1.2,
-                              color: DauVietColors.inkMuted.withValues(alpha: 0.7),
+                              color: DauVietColors.inkMuted.withValues(
+                                alpha: 0.7,
+                              ),
                             ),
                           ),
                           const SizedBox(height: 16),

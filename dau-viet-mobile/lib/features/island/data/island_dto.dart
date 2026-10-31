@@ -1,0 +1,1864 @@
+import 'dart:convert';
+import 'dart:ui';
+
+import 'package:flutter/foundation.dart';
+
+import '../../../core/api/api_client.dart';
+import '../../../core/api/api_config.dart';
+
+final RegExp _uuidRegExp = RegExp(
+  r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$',
+);
+
+final RegExp _learnerAssetPathRegExp = RegExp(
+  r'^/api/v1/assets/([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})/content$',
+);
+
+final RegExp _adminAssetPathRegExp = RegExp(
+  r'^/api/v1/admin/assets/([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})/content$',
+);
+
+int _effectivePort(Uri uri) {
+  if (uri.hasPort && uri.port > 0) return uri.port;
+  return uri.scheme.toLowerCase() == 'https' ? 443 : 80;
+}
+
+bool _isSameOriginAsBackend(Uri uri) {
+  final base = Uri.tryParse(ApiConfig.baseUrl.trim());
+  if (base == null || !base.hasScheme || !base.hasAuthority) return false;
+  if (!uri.hasScheme || !uri.hasAuthority || uri.userInfo.isNotEmpty) {
+    return false;
+  }
+  final schemeStr = uri.scheme.toLowerCase();
+  if (schemeStr != 'http' && schemeStr != 'https') return false;
+  return schemeStr == base.scheme.toLowerCase() &&
+      uri.host.toLowerCase() == base.host.toLowerCase() &&
+      _effectivePort(uri) == _effectivePort(base);
+}
+
+/// Kiểm tra URL có đúng là endpoint `/api/v1/assets/{uuid}/content` thuộc cùng origin
+/// (scheme + host + port) với backend Dấu Việt và không chứa userinfo/query/fragment.
+bool isTrustedBackendAssetUrl(String? url) {
+  if (url == null || url.trim().isEmpty) return false;
+  final uri = Uri.tryParse(url.trim());
+  if (uri == null || !_isSameOriginAsBackend(uri)) return false;
+  if (uri.userInfo.isNotEmpty ||
+      uri.hasQuery ||
+      uri.fragment.isNotEmpty ||
+      uri.path.contains('..')) {
+    return false;
+  }
+  final base = Uri.parse(ApiConfig.baseUrl.trim());
+  final basePrefix = base.path.replaceAll(RegExp(r'/+$'), '');
+  final relPath = basePrefix.isNotEmpty && uri.path.startsWith(basePrefix)
+      ? uri.path.substring(basePrefix.length)
+      : uri.path;
+  return _learnerAssetPathRegExp.hasMatch(relPath);
+}
+
+/// Chỉ đính kèm Bearer token khi `targetUrl` thuộc đúng origin backend Dấu Việt
+/// và đúng endpoint `/api/v1/assets/{uuid}/content`. Tuyệt đối không gửi token ra domain ngoài.
+Map<String, String>? islandAuthHeaders(String? targetUrl) {
+  if (!isTrustedBackendAssetUrl(targetUrl)) return null;
+  final token = ApiClient.authTokenProvider?.call();
+  if (token == null || token.isEmpty) return null;
+  return {'Authorization': 'Bearer $token'};
+}
+
+/// Chuyển đổi `assetId` (UUID) hoặc đường dẫn `/api/v1/assets/{uuid}/content` thành URL hợp lệ.
+/// Không tự ý biến URL admin của domain ngoài thành URL learner.
+String? resolveIslandRemoteAssetUrl(String? rawRefOrAssetId) {
+  if (rawRefOrAssetId == null) return null;
+  final trimmed = rawRefOrAssetId.trim();
+  if (trimmed.isEmpty ||
+      trimmed.contains('..') ||
+      trimmed.contains('\\') ||
+      trimmed.contains('@') ||
+      trimmed.contains('?') ||
+      trimmed.contains('#')) {
+    return null;
+  }
+  final cleanBase = ApiConfig.baseUrl.trim().replaceAll(RegExp(r'/+$'), '');
+  if (_uuidRegExp.hasMatch(trimmed)) {
+    return '$cleanBase/api/v1/assets/$trimmed/content';
+  }
+  final learnerMatch = _learnerAssetPathRegExp.firstMatch(trimmed);
+  if (learnerMatch != null) {
+    return '$cleanBase/api/v1/assets/${learnerMatch.group(1)}/content';
+  }
+  final adminMatch = _adminAssetPathRegExp.firstMatch(trimmed);
+  if (adminMatch != null) {
+    return '$cleanBase/api/v1/assets/${adminMatch.group(1)}/content';
+  }
+  if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) {
+    final uri = Uri.tryParse(trimmed);
+    if (uri == null ||
+        !uri.hasScheme ||
+        !uri.hasAuthority ||
+        uri.userInfo.isNotEmpty ||
+        uri.hasQuery ||
+        uri.fragment.isNotEmpty) {
+      return null;
+    }
+    if (_isSameOriginAsBackend(uri)) {
+      final base = Uri.parse(cleanBase);
+      final basePrefix = base.path.replaceAll(RegExp(r'/+$'), '');
+      final relPath = basePrefix.isNotEmpty && uri.path.startsWith(basePrefix)
+          ? uri.path.substring(basePrefix.length)
+          : uri.path;
+      final sameOriginLearner = _learnerAssetPathRegExp.firstMatch(relPath);
+      if (sameOriginLearner != null) {
+        return '$cleanBase/api/v1/assets/${sameOriginLearner.group(1)}/content';
+      }
+      final sameOriginAdmin = _adminAssetPathRegExp.firstMatch(relPath);
+      if (sameOriginAdmin != null) {
+        return '$cleanBase/api/v1/assets/${sameOriginAdmin.group(1)}/content';
+      }
+      return null;
+    }
+  }
+  return null;
+}
+
+/// Trả về đường dẫn asset cục bộ đã đóng gói dựa vào renderKey hoặc code.
+/// Trả về null nếu vật phẩm chưa có tranh minh họa cục bộ tương ứng —
+/// tuyệt đối KHÔNG biến mọi vật phẩm lạ thành `decor_nha_tranh.png`.
+String? resolveIslandAsset(String? renderKey, String? code, [String? assetId]) {
+  final rk = (renderKey ?? '').toLowerCase().trim();
+  final cd = (code ?? '').toLowerCase().trim();
+
+  if (rk.startsWith('assets/') && !rk.contains('..')) {
+    return renderKey!.trim();
+  }
+
+  for (final token in [rk, cd]) {
+    if (token.isEmpty) continue;
+    if (token == 'decor.nha_tranh' ||
+        token == 'decor_nha_tranh' ||
+        token == 'nha_tranh') {
+      return 'assets/items/decor_nha_tranh.png';
+    }
+    if (token == 'decor.cau_kieu' ||
+        token == 'decor_cau_kieu' ||
+        token == 'cau_kieu') {
+      return 'assets/items/decor_cau_kieu.png';
+    }
+    if (token == 'decor.ho_sen' ||
+        token == 'decor_ho_sen' ||
+        token == 'ho_sen') {
+      return 'assets/items/decor_ho_sen.png';
+    }
+    if (token == 'decor.cay_da' ||
+        token == 'decor_cay_da' ||
+        token == 'cay_da') {
+      return 'assets/items/decor_cay_da.png';
+    }
+    if (token == 'decor.nha_rong' ||
+        token == 'decor_nha_rong' ||
+        token == 'nha_rong') {
+      return 'assets/island/buildings/nha_rong.png';
+    }
+    if (token == 'decor.dinh_lang' ||
+        token == 'decor_dinh_lang' ||
+        token == 'dinh_lang') {
+      return 'assets/island/buildings/dinh_lang.png';
+    }
+    if (token == 'decor.chua_co' ||
+        token == 'decor_chua_co' ||
+        token == 'chua_co') {
+      return 'assets/island/buildings/chua_co.png';
+    }
+    if (token == 'decor.thap_cham' ||
+        token == 'decor_thap_cham' ||
+        token == 'thap_cham' ||
+        token == 'decor.chua_my_son' ||
+        token == 'chua_my_son' ||
+        token == 'mo_hinh_chua_my_son' ||
+        token == 'replica.chua_my_son') {
+      return 'assets/island/buildings/thap_cham.png';
+    }
+    if (token == 'decor.cot_co' ||
+        token == 'decor_cot_co' ||
+        token == 'cot_co') {
+      return 'assets/island/buildings/cot_co.png';
+    }
+    if (token == 'decor.buc_tuong' ||
+        token == 'decor_buc_tuong' ||
+        token == 'buc_tuong' ||
+        token == 'decor.tuong_ly_thai_to' ||
+        token == 'decor_tuong_ly_thai_to' ||
+        token == 'tuong_ly_thai_to') {
+      return 'assets/island/buildings/buc_tuong.png';
+    }
+    if (token == 'decor.tre_truc' ||
+        token == 'decor_tre_truc' ||
+        token == 'tre_truc' ||
+        token == 'decor.bui_tre' ||
+        token == 'decor_bui_tre' ||
+        token == 'bui_tre') {
+      return 'assets/island/scenery/bamboo_grove_large.png';
+    }
+    if (token == 'decor.cong_lang' ||
+        token == 'decor_cong_lang' ||
+        token == 'cong_lang') {
+      return 'assets/island/buildings/cong_lang.png';
+    }
+    if (token == 'decor.khue_van' ||
+        token == 'decor_khue_van' ||
+        token == 'khue_van' ||
+        token == 'decor_khue_van_cac' ||
+        token == 'khue_van_cac') {
+      return 'assets/island/buildings/khue_van_cac.png';
+    }
+    if (token == 'decor.thap_but' ||
+        token == 'decor_thap_but' ||
+        token == 'thap_but') {
+      return 'assets/island/buildings/thap_but.png';
+    }
+    if (token == 'decor.gieng_co' ||
+        token == 'decor_gieng_co' ||
+        token == 'gieng_co') {
+      return 'assets/island/scenery/ancient_stone_well.png';
+    }
+    if (token == 'decor.den_long' ||
+        token == 'decor.den_long_hoi_an' ||
+        token == 'decor_den_long' ||
+        token == 'decor_den_long_hoi_an' ||
+        token == 'den_long' ||
+        token == 'den_da') {
+      return 'assets/island/scenery/stone_lantern.png';
+    }
+    if (token == 'decor.cay_dao' ||
+        token == 'decor_cay_dao' ||
+        token == 'cay_dao') {
+      return 'assets/island/scenery/flowering_shrub.png';
+    }
+    if (token == 'choi_canh' ||
+        token == 'mo_hinh_choi_canh_bach_dang' ||
+        token == 'replica.choi_canh_bach_dang' ||
+        token.contains('choi_canh')) {
+      return 'assets/island/buildings/choi_canh_bach_dang.png';
+    }
+    if (token == 'coc_bach_dang' ||
+        token == 'phien_ban_so_coc_bach_dang' ||
+        token == 'replica.coc_bach_dang' ||
+        token.contains('coc_bach_dang')) {
+      return 'assets/island/buildings/coc_bach_dang.png';
+    }
+    if (token == 'trong_dong' ||
+        token == 'mo_hinh_trong_dong_dong_son' ||
+        token == 'replica.trong_dong_dong_son' ||
+        token.contains('trong_dong')) {
+      return 'assets/island/buildings/trong_dong_dong_son.png';
+    }
+    if (token == 'thanh_nha_ho' ||
+        token == 'mo_hinh_thanh_nha_ho' ||
+        token == 'replica.thanh_nha_ho' ||
+        token.contains('thanh_nha_ho')) {
+      return 'assets/island/buildings/thanh_nha_ho.png';
+    }
+    if (token == 'co_loa' ||
+        token == 'phien_ban_so_co_loa' ||
+        token == 'replica.co_loa' ||
+        token.contains('co_loa')) {
+      return 'assets/island/buildings/co_loa.png';
+    }
+    if (token == 'pho_hoi_an' ||
+        token == 'phien_ban_so_pho_hoi_an' ||
+        token == 'replica.pho_hoi_an' ||
+        token.contains('pho_hoi_an')) {
+      return 'assets/island/buildings/pho_hoi_an.png';
+    }
+    if (token == 'no_lien_chau' ||
+        token == 'mo_hinh_no_lien_chau' ||
+        token == 'replica.no_lien_chau' ||
+        token.contains('no_lien_chau')) {
+      return 'assets/island/buildings/no_lien_chau.png';
+    }
+    if (token == 'thuyen_chien' ||
+        token == 'mo_hinh_thuyen_chien_ngo_quyen' ||
+        token == 'replica.thuyen_chien_ngo_quyen' ||
+        token == 'decor.thuyen_rong' ||
+        token == 'decor_thuyen_rong' ||
+        token == 'thuyen_rong' ||
+        token.contains('thuyen_chien')) {
+      return 'assets/island/buildings/thuyen_chien_ngo_quyen.png';
+    }
+    if (token == 'chieu_doi_do' ||
+        token == 'mo_hinh_chieu_doi_do' ||
+        token == 'replica.chieu_doi_do' ||
+        token.contains('chieu_doi_do')) {
+      return 'assets/island/buildings/chieu_doi_do.png';
+    }
+  }
+  return null;
+}
+
+String _friendlyItemNameFromCode(String? code, String? renderKey) {
+  final raw = (code ?? renderKey ?? '').toLowerCase().trim();
+  if (raw.contains('cay_da')) return 'Cây đa cổ thụ';
+  if (raw.contains('nha_rong')) return 'Nhà rông';
+  if (raw.contains('dinh_lang')) return 'Đình làng';
+  if (raw.contains('chua_co')) return 'Chùa cổ';
+  if (raw.contains('thap_cham') || raw.contains('chua_my_son')) {
+    return 'Tháp Chăm';
+  }
+  if (raw.contains('bui_tre') || raw.contains('tre_truc')) return 'Tre trúc';
+  if (raw.contains('cot_co')) return 'Cột cờ';
+  if (raw.contains('tuong_ly_thai_to') || raw.contains('buc_tuong')) {
+    return 'Bức tượng';
+  }
+  if (raw.contains('nha_tranh')) return 'Nhà tranh vách đất';
+  if (raw.contains('ho_sen')) return 'Hồ sen';
+  if (raw.contains('cau_kieu')) return 'Cầu kiều mái cong';
+  if (raw.contains('gieng_co')) return 'Giếng Cổ Đá Xanh';
+  if (raw.contains('cong_lang')) return 'Cổng Làng Đá Ong';
+  if (raw.contains('den_long')) return 'Đèn Lồng Phố Cổ';
+  if (raw.contains('thuyen_rong')) return 'Thuyền Rồng Bến Nước';
+  if (raw.contains('thap_but')) return 'Tháp Bút Truyền Thống';
+  if (raw.contains('khue_van')) return 'Khuê Văn Các Thu Nhỏ';
+  if (raw.contains('cay_dao')) return 'Cây đào cổ thụ';
+  return code ?? 'Vật phẩm di sản';
+}
+
+/// 5 danh mục phân loại trong Khay Vật Phẩm Đảo Di Sản (Issue #46 AC-4).
+enum IslandInventoryCategory {
+  all('Tất cả'),
+  building('Công trình'),
+  tree('Cây cối'),
+  decoration('Trang trí'),
+  other('Khác');
+
+  final String labelVi;
+  const IslandInventoryCategory(this.labelVi);
+  /// 4 tab lọc chính hiển thị trên Modal 1 `KHO VẬT PHẨM` (Issue #50 AC-5).
+  static const List<IslandInventoryCategory> modalTabs = [
+    IslandInventoryCategory.all,
+    IslandInventoryCategory.building,
+    IslandInventoryCategory.tree,
+    IslandInventoryCategory.decoration,
+  ];
+}
+
+/// Phân loại vật phẩm vào các nhóm (`Công trình`, `Cây cối`, `Trang trí`, `Khác`).
+IslandInventoryCategory resolveIslandItemCategory({
+  String? code,
+  String? renderKey,
+  String? category,
+  String? itemType,
+}) {
+  final token =
+      '${code ?? ''} ${renderKey ?? ''} ${category ?? ''} ${itemType ?? ''}'
+          .toLowerCase();
+  if (token.contains('nha_rong') ||
+      token.contains('dinh_lang') ||
+      token.contains('nha_dinh') ||
+      token.contains('chua_co') ||
+      token.contains('thap_cham') ||
+      token.contains('nha_tranh') ||
+      token.contains('cau_kieu') ||
+      token.contains('cong_lang') ||
+      token.contains('khue_van') ||
+      token.contains('thap_but') ||
+      token.contains('thanh_nha_ho') ||
+      token.contains('chua_my_son') ||
+      token.contains('co_loa') ||
+      token.contains('pho_hoi_an') ||
+      token.contains('building')) {
+    return IslandInventoryCategory.building;
+  }
+  if (token.contains('cay_da') ||
+      token.contains('cay_dao') ||
+      token.contains('bui_tre') ||
+      token.contains('tre_truc') ||
+      token.contains('ho_sen') ||
+      token.contains('tree') ||
+      token.contains('plant')) {
+    return IslandInventoryCategory.tree;
+  }
+  if (token.contains('gieng_co') ||
+      token.contains('cot_co') ||
+      token.contains('den_long') ||
+      token.contains('den_da') ||
+      token.contains('tuong_ly_thai_to') ||
+      token.contains('buc_tuong') ||
+      token.contains('tuong') ||
+      token.contains('decoration')) {
+    return IslandInventoryCategory.decoration;
+  }
+  return IslandInventoryCategory.other;
+}
+
+/// Trả về kích thước chiếm ô thực tế trên lưới (`(2, 2)` cho công trình lớn & cây cổ thụ,
+/// `(1, 1)` cho vật phẩm trang trí nhỏ) theo thiết kế 9 màn hình (Issue #50 AC-2 & AC-3).
+(int width, int height) resolveIslandItemFootprint(
+  String? code,
+  String? renderKey,
+) {
+  final token = '${code ?? ''} ${renderKey ?? ''}'.toLowerCase();
+  if (token.contains('nha_rong') ||
+      token.contains('dinh_lang') ||
+      token.contains('nha_dinh') ||
+      token.contains('chua_co') ||
+      token.contains('thap_cham') ||
+      token.contains('cay_da') ||
+      token.contains('khue_van') ||
+      token.contains('thap_but') ||
+      token.contains('cong_lang') ||
+      token.contains('nha_tranh') ||
+      token.contains('ho_sen') ||
+      token.contains('thanh_nha_ho') ||
+      token.contains('chua_my_son') ||
+      token.contains('co_loa')) {
+    return (2, 2);
+  }
+  return (1, 1);
+}
+
+/// Chuỗi hiển thị kích thước trên lưới (`'2x2'` hoặc `'1x1'`).
+String resolveIslandItemFootprintLabel(String? code, String? renderKey) {
+  final (w, h) = resolveIslandItemFootprint(code, renderKey);
+  return '${w}x$h';
+}
+
+/// Mô tả văn hóa — lịch sử chuẩn cho Thẻ Đặt Vật Phẩm (Màn 2) và Modal 2 (`CHI TIẾT VẬT PHẨM`).
+String resolveIslandItemDescription(
+  String? code,
+  String? renderKey, [
+  String? rawDescription,
+]) {
+  final token = '${code ?? ''} ${renderKey ?? ''}'.toLowerCase();
+  if (token.contains('nha_rong')) {
+    return 'Biểu tượng văn hóa cộng đồng của người Việt.';
+  }
+  if (token.contains('cay_da')) {
+    return 'Biểu tượng của làng quê Việt Nam, nơi gắn kết cộng đồng và lưu giữ nhiều câu chuyện lịch sử.';
+  }
+  if (token.contains('dinh_lang') || token.contains('nha_dinh')) {
+    return 'Ngôi đình cổ kính với mái đao cong vút, trung tâm sinh hoạt văn hóa của làng quê Việt.';
+  }
+  if (token.contains('chua_co')) {
+    return 'Ngôi chùa cổ thanh tịnh mang đậm dấu ấn kiến trúc truyền thống Việt Nam.';
+  }
+  if (token.contains('thap_cham') || token.contains('chua_my_son')) {
+    return 'Tuyệt tác kiến trúc gạch nung Chămpa cổ đại trên Đảo Di Sản.';
+  }
+  if (token.contains('bui_tre') || token.contains('tre_truc')) {
+    return 'Lũy tre xanh kiên cường gắn liền với làng quê và lịch sử dân tộc.';
+  }
+  if (token.contains('cot_co')) {
+    return 'Cột cờ truyền thống tung bay tự hào trên Đảo Di Sản.';
+  }
+  if (token.contains('tuong_ly_thai_to') || token.contains('buc_tuong')) {
+    return 'Bức tượng lịch sử tôn vinh các bậc tiền nhân dựng nước và giữ nước.';
+  }
+  if (rawDescription != null && rawDescription.trim().isNotEmpty) {
+    return rawDescription.trim();
+  }
+  return 'Vật phẩm văn hóa lịch sử trang trí cho Đảo Di Sản của bạn.';
+}
+
+/// Giá trị điểm `⭐` hiển thị trên Modal 2 (`CHI TIẾT VẬT PHẨM`).
+int resolveIslandItemPricePoints(
+  String? code,
+  String? renderKey, [
+  int? rawPrice,
+]) {
+  if (rawPrice != null && rawPrice > 0) return rawPrice;
+  final token = '${code ?? ''} ${renderKey ?? ''}'.toLowerCase();
+  if (token.contains('cay_da')) return 50;
+  if (token.contains('nha_rong')) return 120;
+  if (token.contains('dinh_lang')) return 150;
+  if (token.contains('chua_co')) return 180;
+  if (token.contains('thap_cham')) return 200;
+  if (token.contains('bui_tre') || token.contains('tre_truc')) return 40;
+  if (token.contains('cot_co')) return 60;
+  if (token.contains('tuong_ly_thai_to') || token.contains('buc_tuong')) {
+    return 80;
+  }
+  return 50;
+}
+
+/// Tỷ lệ kích thước hiển thị (footprint scale) trên mặt đảo:
+/// Công trình `2x2` lớn > Cây cối / tiểu cảnh vừa > Vật phẩm `1x1` (Issue #50 AC-2).
+double resolveIslandItemVisualScale(String? code, String? renderKey) {
+  final token = '${code ?? ''} ${renderKey ?? ''}'.toLowerCase();
+  if (token.contains('nha_rong') ||
+      token.contains('dinh_lang') ||
+      token.contains('nha_dinh') ||
+      token.contains('chua_co') ||
+      token.contains('thap_cham') ||
+      token.contains('cay_da') ||
+      token.contains('khue_van') ||
+      token.contains('thap_but') ||
+      token.contains('cong_lang') ||
+      token.contains('nha_tranh') ||
+      token.contains('thanh_nha_ho') ||
+      token.contains('chua_my_son') ||
+      token.contains('co_loa') ||
+      token.contains('pho_hoi_an') ||
+      token.contains('choi_canh')) {
+    return 1.72;
+  }
+  if (token.contains('cay_dao') ||
+      token.contains('bui_tre') ||
+      token.contains('tre_truc') ||
+      token.contains('ho_sen') ||
+      token.contains('cau_kieu') ||
+      token.contains('thuyen') ||
+      token.contains('no_lien_chau') ||
+      token.contains('chieu_doi_do')) {
+    return 1.34;
+  }
+  if (token.contains('gieng_co') ||
+      token.contains('cot_co') ||
+      token.contains('den_long') ||
+      token.contains('den_da') ||
+      token.contains('tuong_ly_thai_to') ||
+      token.contains('buc_tuong') ||
+      token.contains('trong_dong') ||
+      token.contains('coc_bach_dang')) {
+    return 1.22;
+  }
+  return 1.32;
+}
+
+/// Tên rút gọn hiển thị trên thẻ vuông 4 cột của Khay Vật Phẩm & Modal `KHO VẬT PHẨM` (Issue #50).
+String shortIslandItemDisplayName(
+  String rawName,
+  String? code,
+  String? renderKey,
+) {
+  final token = '${code ?? ''} ${renderKey ?? ''} $rawName'.toLowerCase();
+  if (token.contains('nha_rong')) return 'Nhà rông';
+  if (token.contains('dinh_lang') || token.contains('nha_dinh')) {
+    return 'Đình làng';
+  }
+  if (token.contains('chua_co')) return 'Chùa cổ';
+  if (token.contains('thap_cham') || token.contains('chua_my_son')) {
+    return 'Tháp Chăm';
+  }
+  if (token.contains('cay_da')) return 'Cây đa';
+  if (token.contains('bui_tre') || token.contains('tre_truc')) {
+    return 'Tre trúc';
+  }
+  if (token.contains('cot_co')) return 'Cột cờ';
+  if (token.contains('tuong_ly_thai_to') || token.contains('buc_tuong')) {
+    return 'Bức tượng';
+  }
+  if (token.contains('gieng_co')) return 'Giếng cổ';
+  if (token.contains('thuyen_rong') || token.contains('thuyen')) {
+    return 'Thuyền';
+  }
+  if (token.contains('cay_dao')) return 'Cây đào';
+  if (token.contains('den_long') || token.contains('den_da')) {
+    return 'Đèn lồng';
+  }
+  if (token.contains('nha_tranh')) return 'Nhà tranh';
+  if (token.contains('cau_kieu')) return 'Cầu kiều';
+  if (token.contains('ho_sen')) return 'Hồ sen';
+  if (token.contains('cong_lang')) return 'Cổng làng';
+  if (token.contains('khue_van')) return 'Khuê Văn Các';
+  if (token.contains('thap_but')) return 'Tháp Bút';
+  if (token.contains('choi_canh')) return 'Chòi canh';
+  if (token.contains('no_lien_chau')) return 'Nỏ Liên Châu';
+  if (token.contains('chieu_doi_do')) return 'Thiên Đô Chiếu';
+  if (token.contains('thuyen_chien')) return 'Chiến thuyền';
+  if (token.contains('trong_dong')) return 'Trống đồng';
+  if (token.contains('coc_bach_dang')) return 'Cọc Bạch Đằng';
+  if (token.contains('thanh_nha_ho')) return 'Thành nhà Hồ';
+  if (token.contains('co_loa')) return 'Thành Cổ Loa';
+  if (token.contains('pho_hoi_an')) return 'Phố Hội An';
+  return rawName;
+}
+/// Thông tin vật phẩm đặt trên một slot của đảo.
+@immutable
+class IslandPlacementDto {
+  final String itemId;
+  final String code;
+  final String name;
+  final String? renderKey;
+  final String? assetId;
+
+  const IslandPlacementDto({
+    required this.itemId,
+    required this.code,
+    required this.name,
+    this.renderKey,
+    this.assetId,
+  });
+
+  String? get assetPath => resolveIslandAsset(renderKey, code, assetId);
+
+  String? get remoteAssetUrl =>
+      resolveIslandRemoteAssetUrl(assetId) ??
+      resolveIslandRemoteAssetUrl(renderKey);
+
+  factory IslandPlacementDto.fromJson(Map<String, dynamic> json) {
+    final code = json['code'] as String? ?? '';
+    final renderKey = json['renderKey'] as String?;
+    final rawName = json['name'] as String?;
+    return IslandPlacementDto(
+      itemId: json['itemId'] as String? ?? '',
+      code: code,
+      name: (rawName != null && rawName.isNotEmpty && rawName != code)
+          ? rawName
+          : _friendlyItemNameFromCode(code, renderKey),
+      renderKey: renderKey,
+      assetId: json['assetId'] as String?,
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+    'itemId': itemId,
+    'code': code,
+    'name': name,
+    if (renderKey != null) 'renderKey': renderKey,
+    if (assetId != null) 'assetId': assetId,
+  };
+}
+
+/// Loại địa hình của một ô tile trên bản đồ isometric Đảo Di Sản.
+enum IslandTerrainType {
+  grass,
+  dirt,
+  stone,
+  sand,
+  path,
+  decorative,
+  water;
+
+  static IslandTerrainType fromString(String? raw) {
+    switch (raw?.toUpperCase().trim()) {
+      case 'DIRT':
+        return IslandTerrainType.dirt;
+      case 'STONE':
+        return IslandTerrainType.stone;
+      case 'SAND':
+        return IslandTerrainType.sand;
+      case 'PATH':
+        return IslandTerrainType.path;
+      case 'DECORATIVE':
+      case 'DECOR':
+        return IslandTerrainType.decorative;
+      case 'WATER':
+        return IslandTerrainType.water;
+      case 'GRASS':
+      default:
+        return IslandTerrainType.grass;
+    }
+  }
+
+  String toCode() => name.toUpperCase();
+}
+
+/// Một ô tile hình thoi (isometric diamond) của Đảo Di Sản.
+@immutable
+class IslandTileDto {
+  final String key;
+  final int row;
+  final int col;
+  final IslandTerrainType terrainType;
+  final String? regionCode;
+  final int unlockTier;
+  final double elevation;
+  final String? decorKey;
+  final String? slotId;
+  /// Backend V48: tile được phép host slot (độc lập với slotId — slot là
+  /// quan hệ đã link, buildable là quyền host). Default true cho fixture.
+  final bool buildable;
+  /// Backend V48: tile đã mở khóa theo tier hiện tại của đảo.
+  final bool unlocked;
+
+  const IslandTileDto({
+    required this.key,
+    required this.row,
+    required this.col,
+    this.terrainType = IslandTerrainType.grass,
+    this.regionCode,
+    this.unlockTier = 1,
+    this.elevation = 0.0,
+    this.decorKey,
+    this.slotId,
+    this.buildable = true,
+    this.unlocked = true,
+  });
+
+  /// Có thể đặt vật phẩm: buildable và có slot đã link hợp lệ.
+  bool get isBuildable =>
+      buildable && slotId != null && slotId!.isNotEmpty;
+
+  IslandTileDto copyWith({
+    String? key,
+    int? row,
+    int? col,
+    IslandTerrainType? terrainType,
+    String? regionCode,
+    int? unlockTier,
+    double? elevation,
+    String? decorKey,
+    String? slotId,
+    bool? buildable,
+    bool? unlocked,
+  }) {
+    return IslandTileDto(
+      key: key ?? this.key,
+      row: row ?? this.row,
+      col: col ?? this.col,
+      terrainType: terrainType ?? this.terrainType,
+      regionCode: regionCode ?? this.regionCode,
+      unlockTier: unlockTier ?? this.unlockTier,
+      elevation: elevation ?? this.elevation,
+      decorKey: decorKey ?? this.decorKey,
+      slotId: slotId ?? this.slotId,
+      buildable: buildable ?? this.buildable,
+      unlocked: unlocked ?? this.unlocked,
+    );
+  }
+
+  /// Contract BE V48: tileKey/row/column/terrainType/regionCode/unlockTier/
+  /// unlocked/buildable/visualKey/elevation. Hỗ trợ key/col/decorKey cũ
+  /// (fixture nội bộ). SlotId được ánh xạ sau từ slot.tileKey, không parse ở đây.
+  factory IslandTileDto.fromJson(Map<String, dynamic> json) {
+    final row = (json['row'] as num?)?.toInt() ?? 0;
+    final col = (json['column'] as num?)?.toInt() ??
+        (json['col'] as num?)?.toInt() ??
+        0;
+    return IslandTileDto(
+      key: json['tileKey'] as String? ??
+          json['key'] as String? ??
+          'tile_${row}_$col',
+      row: row,
+      col: col,
+      terrainType: IslandTerrainType.fromString(
+        json['terrainType'] as String? ?? json['terrain'] as String?,
+      ),
+      regionCode: json['regionCode'] as String?,
+      unlockTier: (json['unlockTier'] as num?)?.toInt() ??
+          (json['tier'] as num?)?.toInt() ??
+          1,
+      unlocked: json['unlocked'] as bool? ?? true,
+      buildable: json['buildable'] as bool? ?? true,
+      elevation: (json['elevation'] as num?)?.toDouble() ?? 0.0,
+      decorKey: json['visualKey'] as String? ?? json['decorKey'] as String?,
+      slotId: json['slotId'] as String?,
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+    'tileKey': key,
+    'row': row,
+    'column': col,
+    'terrainType': terrainType.toCode(),
+    if (regionCode != null) 'regionCode': regionCode,
+    'unlockTier': unlockTier,
+    'unlocked': unlocked,
+    'buildable': buildable,
+    'elevation': elevation,
+    if (decorKey != null) 'visualKey': decorKey,
+    if (slotId != null) 'slotId': slotId,
+  };
+}
+
+/// Bàn cờ / ma trận isometric của Đảo Di Sản.
+@immutable
+class IslandBoardDto {
+  final int rows;
+  final int cols;
+  final double tileWidth;
+  final double tileHeight;
+  final List<IslandTileDto> tiles;
+  /// Backend V48: gốc tọa độ logic của board (thường 0,0).
+  final double originX;
+  final double originY;
+  /// Backend V48: projection type (ISOMETRIC). null = dữ liệu fixture cũ.
+  final String? projectionType;
+  /// Backend V48: board có tồn tại tiles thật từ API (phân biệt fixture).
+  final bool fromBackend;
+
+  const IslandBoardDto({
+    this.rows = 12,
+    this.cols = 12,
+    this.tileWidth = 72.0,
+    this.tileHeight = 36.0,
+    this.tiles = const [],
+    this.originX = 0.0,
+    this.originY = 0.0,
+    this.projectionType,
+    this.fromBackend = false,
+  });
+
+
+  /// V51: trả bản board chỉ giữ các tile được cung cấp — dùng để preview
+  /// tier thấp hơn (đảo nhỏ/vừa = subset của đảo lớn).
+  IslandBoardDto copyWithTiles(List<IslandTileDto> newTiles) {
+    return IslandBoardDto(
+      rows: rows,
+      cols: cols,
+      tileWidth: tileWidth,
+      tileHeight: tileHeight,
+      originX: originX,
+      originY: originY,
+      projectionType: projectionType,
+      fromBackend: fromBackend,
+      tiles: newTiles,
+    );
+  }
+  /// Tìm tile theo (row, col)
+  IslandTileDto? tileAt(int row, int col) {
+    for (final t in tiles) {
+      if (t.row == row && t.col == col) return t;
+    }
+    return null;
+  }
+
+  /// Tìm tile liên kết với slotId
+  IslandTileDto? tileForSlot(String slotId) {
+    for (final t in tiles) {
+      if (t.slotId == slotId) return t;
+    }
+    return null;
+  }
+
+  /// Tìm tile liên kết với slot (theo tileKey trước, rồi slotId trên tile).
+  IslandTileDto? tileForSlotDto(IslandSlotDto slot) {
+    if (slot.tileKey != null) {
+      for (final t in tiles) {
+        if (t.key == slot.tileKey) return t;
+      }
+    }
+    return tileForSlot(slot.slotId);
+  }
+
+  /// Tính tọa độ màn hình (isoX, isoY) tâm hình thoi của tile (row, col)
+  Offset toScreenOffset(int row, int col, {double originX = 0, double originY = 0}) {
+    final isoX = (col - row) * (tileWidth * 0.5) + originX;
+    final isoY = (col + row) * (tileHeight * 0.5) + originY;
+    return Offset(isoX, isoY);
+  }
+
+  /// Đổi tọa độ màn hình (dx, dy) sang (row, col) trên lưới isometric (Hit Testing chuẩn 2:1)
+  (int row, int col) pointToGrid(Offset point, {double originX = 0, double originY = 0}) {
+    final dx = point.dx - originX;
+    final dy = point.dy - originY;
+    final halfW = tileWidth * 0.5;
+    final halfH = tileHeight * 0.5;
+    final colF = ((dy / halfH) + (dx / halfW)) * 0.5;
+    final rowF = ((dy / halfH) - (dx / halfW)) * 0.5;
+    return (rowF.round(), colF.round());
+  }
+
+  /// Contract BE V48: `board` chỉ chứa metadata lưới (gridRows/gridColumns/
+  /// tileWidth/tileHeight/boardOriginX/Y/projectionType); tiles nằm ngoài
+  /// IslandResponse và được truyền vào qua [externalTiles]. Vẫn hỗ trợ
+  /// `board.tiles` nội bộ để fixture mock không hỏng.
+  factory IslandBoardDto.fromJson(
+    Map<String, dynamic> json, {
+    List<IslandTileDto>? externalTiles,
+  }) {
+    final rawTiles = json['tiles'];
+    final parsedTiles = rawTiles is List
+        ? rawTiles
+            .whereType<Map>()
+            .map((e) => IslandTileDto.fromJson(e.cast<String, dynamic>()))
+            .toList()
+        : (externalTiles ?? const <IslandTileDto>[]);
+    return IslandBoardDto(
+      rows: (json['gridRows'] as num?)?.toInt() ??
+          (json['rows'] as num?)?.toInt() ??
+          12,
+      cols: (json['gridColumns'] as num?)?.toInt() ??
+          (json['cols'] as num?)?.toInt() ??
+          12,
+      tileWidth: (json['tileWidth'] as num?)?.toDouble() ?? 72.0,
+      tileHeight: (json['tileHeight'] as num?)?.toDouble() ?? 36.0,
+      originX: (json['boardOriginX'] as num?)?.toDouble() ?? 0.0,
+      originY: (json['boardOriginY'] as num?)?.toDouble() ?? 0.0,
+      projectionType: json['projectionType'] as String?,
+      fromBackend: json.containsKey('gridRows') ||
+          json.containsKey('projectionType') ||
+          (externalTiles != null && externalTiles.isNotEmpty),
+      tiles: parsedTiles,
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+    'gridRows': rows,
+    'gridColumns': cols,
+    'tileWidth': tileWidth,
+    'tileHeight': tileHeight,
+    'boardOriginX': originX,
+    'boardOriginY': originY,
+    if (projectionType != null) 'projectionType': projectionType,
+    'tiles': tiles.map((t) => t.toJson()).toList(),
+  };
+
+  /// Gắn slots vào tiles theo quan hệ `slot.tileKey → tile.tileKey` (V48).
+  /// Chỉ 1 slot/tile; slot không khớp tileKey nào bị bỏ qua (không suy đoán
+  /// từ x/y khi backend đã cung cấp tileKey). Trả board mới với tile.slotId
+  /// đã resolve.
+  IslandBoardDto linkSlotsToTiles(List<IslandSlotDto> slots) {
+    if (tiles.isEmpty) return this;
+    // tileKey → slotId: giữ slot đầu tiên khớp (BE đảm bảo 1:1 qua ux index)
+    final Map<String, String> slotIdByTileKey = {};
+    for (final s in slots) {
+      final key = s.tileKey;
+      if (key != null && key.isNotEmpty && !slotIdByTileKey.containsKey(key)) {
+        slotIdByTileKey[key] = s.slotId;
+      }
+    }
+    if (slotIdByTileKey.isEmpty) return this;
+    return IslandBoardDto(
+      rows: rows,
+      cols: cols,
+      tileWidth: tileWidth,
+      tileHeight: tileHeight,
+      originX: originX,
+      originY: originY,
+      projectionType: projectionType,
+      fromBackend: fromBackend,
+      tiles: tiles
+          .map((t) => slotIdByTileKey.containsKey(t.key)
+              ? t.copyWith(slotId: slotIdByTileKey[t.key])
+              : t)
+          .toList(),
+    );
+  }
+
+  /// Tổng hợp bản đồ isometric tự nhiên liên kết chặt chẽ với danh sách slots và regions
+  /// Tổng hợp bản đồ isometric đồng tâm 10x10 liên kết chặt chẽ với danh sách slots và regions (Issue #50: 6x6 / 8x8 / 10x10)
+  static IslandBoardDto buildDefaultBoard({
+    required List<IslandSlotDto> slots,
+    required List<IslandLayoutRegionDto> regions,
+    int rows = 10,
+    int cols = 10,
+    double tileWidth = 84.0,
+    double tileHeight = 42.0,
+  }) {
+    final List<IslandTileDto> generatedTiles = [];
+
+    final Map<String, (int row, int col)> slotToCoord = {};
+    for (int i = 0; i < slots.length; i++) {
+      final s = slots[i];
+      if (s.tileRow != null && s.tileCol != null) {
+        slotToCoord[s.slotId] = (
+          s.tileRow!.clamp(0, rows - 1),
+          s.tileCol!.clamp(0, cols - 1),
+        );
+      } else {
+        final r = (s.y * (rows - 1)).round().clamp(0, rows - 1);
+        final c = (s.x * (cols - 1)).round().clamp(0, cols - 1);
+        slotToCoord[s.slotId] = (r, c);
+      }
+    }
+
+    final Map<(int, int), IslandSlotDto> coordToSlot = {};
+    for (final s in slots) {
+      final coord = slotToCoord[s.slotId];
+      if (coord != null) {
+        coordToSlot[coord] = s;
+      }
+    }
+
+    // Lưới đồng tâm 10x10: T1 = 6x6 giữa (2..7), T2 = 8x8 (1..8), T3 = 10x10 (0..9)
+    for (int r = 0; r < rows; r++) {
+      for (int c = 0; c < cols; c++) {
+        final slotOnTile = coordToSlot[(r, c)];
+        int unlockTier;
+        String regionCode;
+        if (slotOnTile != null) {
+          unlockTier = slotOnTile.unlockTier;
+          regionCode = slotOnTile.regionCode ?? 'TIER_$unlockTier';
+        } else if (r >= 2 && r <= 7 && c >= 2 && c <= 7) {
+          unlockTier = 1;
+          regionCode = 'TIER_1';
+        } else if (r >= 1 && r <= 8 && c >= 1 && c <= 8) {
+          unlockTier = 2;
+          regionCode = 'TIER_2';
+        } else {
+          unlockTier = 3;
+          regionCode = 'TIER_3';
+        }
+
+        IslandTerrainType terrain = IslandTerrainType.grass;
+        double elevation = 0.0;
+        String? decorKey;
+
+        if (r >= 3 && r <= 4 && c >= 3 && c <= 4) {
+          terrain = IslandTerrainType.dirt;
+          elevation = 1.0;
+        } else if (slotOnTile != null) {
+          terrain = IslandTerrainType.dirt;
+        } else if ((r == 5 && c >= 1 && c <= 8) ||
+            (c == 5 && r >= 1 && r <= 8)) {
+          terrain = IslandTerrainType.path;
+        } else if ((r == 0 || r == rows - 1) && (c == 0 || c == cols - 1)) {
+          terrain = IslandTerrainType.stone;
+        }
+
+        generatedTiles.add(
+          IslandTileDto(
+            key: 'tile_${r}_$c',
+            row: r,
+            col: c,
+            terrainType: terrain,
+            regionCode: regionCode,
+            unlockTier: unlockTier,
+            elevation: elevation,
+            decorKey: decorKey,
+            slotId: slotOnTile?.slotId,
+          ),
+        );
+      }
+    }
+
+    return IslandBoardDto(
+      rows: rows,
+      cols: cols,
+      tileWidth: tileWidth,
+      tileHeight: tileHeight,
+      tiles: generatedTiles,
+    );
+  }
+}
+
+/// Thông tin một slot trên bản đồ đảo di sản isometric.
+@immutable
+class IslandSlotDto {
+  final String slotId;
+  final double x;
+  final double y;
+  final int zIndex;
+  final int unlockTier;
+  final bool unlocked;
+  final List<String> allowedCategories;
+  final IslandPlacementDto? placement;
+  // V43/V44 layout fields
+  final String? stableSlotKey;
+  final String? regionCode;
+  final double anchorX;
+  final double anchorY;
+  final double widthNorm;
+  final double heightNorm;
+  final int? tileRow;
+  final int? tileCol;
+  /// Backend V48: key của tile host — liên kết slot ↔ tile duy nhất, không
+  /// suy đoán từ x/y khi field này có sẵn.
+  final String? tileKey;
+
+  const IslandSlotDto({
+    required this.slotId,
+    required this.x,
+    required this.y,
+    this.zIndex = 0,
+    this.unlockTier = 1,
+    this.unlocked = true,
+    this.allowedCategories = const ['DECOR'],
+    this.placement,
+    this.stableSlotKey,
+    this.regionCode,
+    this.anchorX = 0.5,
+    this.anchorY = 1.0,
+    this.widthNorm = 0.10,
+    this.heightNorm = 0.12,
+    this.tileRow,
+    this.tileCol,
+    this.tileKey,
+  });
+
+  bool get isOccupied => placement != null;
+  bool get isEmpty => unlocked && placement == null;
+  bool get isLocked => !unlocked;
+
+  IslandSlotDto copyWith({
+    String? slotId,
+    double? x,
+    double? y,
+    int? zIndex,
+    int? unlockTier,
+    bool? unlocked,
+    List<String>? allowedCategories,
+    IslandPlacementDto? Function()? placement,
+    String? stableSlotKey,
+    String? regionCode,
+    double? anchorX,
+    double? anchorY,
+    double? widthNorm,
+    double? heightNorm,
+    int? tileRow,
+    int? tileCol,
+    String? tileKey,
+  }) {
+    return IslandSlotDto(
+      slotId: slotId ?? this.slotId,
+      x: x ?? this.x,
+      y: y ?? this.y,
+      zIndex: zIndex ?? this.zIndex,
+      unlockTier: unlockTier ?? this.unlockTier,
+      unlocked: unlocked ?? this.unlocked,
+      allowedCategories: allowedCategories ?? this.allowedCategories,
+      placement: placement != null ? placement() : this.placement,
+      stableSlotKey: stableSlotKey ?? this.stableSlotKey,
+      regionCode: regionCode ?? this.regionCode,
+      anchorX: anchorX ?? this.anchorX,
+      anchorY: anchorY ?? this.anchorY,
+      widthNorm: widthNorm ?? this.widthNorm,
+      heightNorm: heightNorm ?? this.heightNorm,
+      tileRow: tileRow ?? this.tileRow,
+      tileCol: tileCol ?? this.tileCol,
+      tileKey: tileKey ?? this.tileKey,
+    );
+  }
+
+  factory IslandSlotDto.fromJson(Map<String, dynamic> json) {
+    final rawCategories = json['allowedCategories'];
+    // Backend SlotView fields: slotId, slotIndex, tierRequired, unlocked,
+    // coordX, coordY, placedItemId, placedItemCode, placedRenderKey, placedAt.
+    // Fall-back to legacy field names so MockIslandRepository still works.
+    final placedItemId = json['placedItemId'] as String?;
+    final placedItemCode = json['placedItemCode'] as String?;
+    final placedItemName = json['placedItemName'] as String?;
+    final placedRenderKey = json['placedRenderKey'] as String?;
+    final placedAssetId = json['placedAssetId'] as String?;
+    // Build placement from flat backend fields, or from legacy nested map
+    IslandPlacementDto? placement;
+    if (placedItemId != null) {
+      placement = IslandPlacementDto(
+        itemId: placedItemId,
+        code: placedItemCode ?? '',
+        name: (placedItemName != null &&
+                placedItemName.isNotEmpty &&
+                placedItemName != placedItemCode)
+            ? placedItemName
+            : _friendlyItemNameFromCode(placedItemCode, placedRenderKey),
+        renderKey: placedRenderKey,
+        assetId: placedAssetId,
+      );
+    } else if (json['placement'] is Map) {
+      placement = IslandPlacementDto.fromJson(
+        (json['placement'] as Map).cast<String, dynamic>(),
+      );
+    }
+    return IslandSlotDto(
+      slotId: json['slotId'] as String? ?? '',
+      x: (json['coordX'] as num?)?.toDouble() ??
+          (json['x'] as num?)?.toDouble() ??
+          0.5,
+      y: (json['coordY'] as num?)?.toDouble() ??
+          (json['y'] as num?)?.toDouble() ??
+          0.5,
+      zIndex: (json['zIndex'] as num?)?.toInt() ??
+          (json['slotIndex'] as num?)?.toInt() ??
+          0,
+      unlockTier: (json['tierRequired'] as num?)?.toInt() ??
+          (json['unlockTier'] as num?)?.toInt() ??
+          1,
+      unlocked: json['unlocked'] as bool? ?? true,
+      allowedCategories: rawCategories is List
+          ? rawCategories.whereType<String>().toList()
+          : const ['DECOR'],
+      placement: placement,
+      stableSlotKey: json['stableSlotKey'] as String?,
+      regionCode: json['regionCode'] as String?,
+      anchorX: (json['anchorX'] as num?)?.toDouble() ?? 0.5,
+      anchorY: (json['anchorY'] as num?)?.toDouble() ?? 1.0,
+      widthNorm: (json['widthNorm'] as num?)?.toDouble() ?? 0.10,
+      heightNorm: (json['heightNorm'] as num?)?.toDouble() ?? 0.12,
+      tileRow: (json['tileRow'] as num?)?.toInt() ??
+          (json['row'] as num?)?.toInt(),
+      tileCol: (json['tileCol'] as num?)?.toInt() ??
+          (json['col'] as num?)?.toInt(),
+      tileKey: json['tileKey'] as String?,
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+    'slotId': slotId,
+    'x': x,
+    'y': y,
+    'zIndex': zIndex,
+    'unlockTier': unlockTier,
+    'unlocked': unlocked,
+    'allowedCategories': allowedCategories,
+    'placement': placement?.toJson(),
+    if (stableSlotKey != null) 'stableSlotKey': stableSlotKey,
+    if (regionCode != null) 'regionCode': regionCode,
+    'anchorX': anchorX,
+    'anchorY': anchorY,
+    'widthNorm': widthNorm,
+    'heightNorm': heightNorm,
+    if (tileRow != null) 'tileRow': tileRow,
+    if (tileCol != null) 'tileCol': tileCol,
+    if (tileKey != null) 'tileKey': tileKey,
+  };
+}
+
+/// Vùng đất trong layout, mở theo Tier (ISLAND-03/04).
+@immutable
+class IslandLayoutRegionDto {
+  final String regionCode;
+  final int unlockTier;
+  final bool unlocked;
+  final String? label;
+
+  /// JSON string mô tả hình chữ nhật tương đối {x,y,width,height}.
+  final String? boundsJson;
+
+  const IslandLayoutRegionDto({
+    required this.regionCode,
+    required this.unlockTier,
+    this.unlocked = false,
+    this.label,
+    this.boundsJson,
+  });
+
+  /// Giải mã hình chữ nhật chuẩn hóa [0,1] từ boundsJson.
+  Rect? parseNormalizedBounds() {
+    if (boundsJson == null || boundsJson!.trim().isEmpty) return null;
+    try {
+      final decoded = jsonDecode(boundsJson!);
+      if (decoded is Map) {
+        final x = (decoded['x'] as num?)?.toDouble();
+        final y = (decoded['y'] as num?)?.toDouble();
+        final w = (decoded['width'] as num?)?.toDouble();
+        final h = (decoded['height'] as num?)?.toDouble();
+        if (x != null && y != null && w != null && h != null && w > 0 && h > 0) {
+          return Rect.fromLTWH(x, y, w, h);
+        }
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  factory IslandLayoutRegionDto.fromJson(Map<String, dynamic> json) {
+    return IslandLayoutRegionDto(
+      regionCode: json['regionCode'] as String? ?? '',
+      unlockTier: (json['unlockTier'] as num?)?.toInt() ?? 1,
+      unlocked: json['unlocked'] as bool? ?? false,
+      label: json['label'] as String?,
+      boundsJson: json['boundsJson'] as String?,
+    );
+  }
+}
+
+/// Lớp scene của layout để Flutter render từng layer theo thứ tự (ISLAND-03/04).
+@immutable
+class IslandSceneLayerDto {
+  final String layerKey;
+  final String layerType;
+  final int renderOrder;
+  final String? assetRef;
+  final String? visibilityRuleJson;
+
+  const IslandSceneLayerDto({
+    required this.layerKey,
+    required this.layerType,
+    this.renderOrder = 0,
+    this.assetRef,
+    this.visibilityRuleJson,
+  });
+
+  bool isVisibleForTier(int currentTier) {
+    if (visibilityRuleJson == null || visibilityRuleJson!.trim().isEmpty) {
+      return true;
+    }
+    try {
+      final decoded = jsonDecode(visibilityRuleJson!);
+      if (decoded is Map) {
+        final minTier = (decoded['minTier'] as num?)?.toInt();
+        final maxTier = (decoded['maxTier'] as num?)?.toInt();
+        if (minTier != null && currentTier < minTier) return false;
+        if (maxTier != null && currentTier > maxTier) return false;
+      }
+    } catch (_) {}
+    return true;
+  }
+
+  factory IslandSceneLayerDto.fromJson(Map<String, dynamic> json) {
+    return IslandSceneLayerDto(
+      layerKey: json['layerKey'] as String? ?? '',
+      layerType: json['layerType'] as String? ?? 'STATIC_IMAGE',
+      renderOrder: (json['renderOrder'] as num?)?.toInt() ?? 0,
+      assetRef: json['assetRef'] as String?,
+      visibilityRuleJson: json['visibilityRuleJson'] as String?,
+    );
+  }
+}
+
+/// Tiến độ sự kiện hoàn thành để mở rộng đảo sang Tier tiếp theo.
+@immutable
+class IslandProgressDto {
+  final int completedEvents;
+  final int nextTierRequiredEvents;
+  final bool canUpgrade;
+
+  const IslandProgressDto({
+    this.completedEvents = 0,
+    this.nextTierRequiredEvents = 2,
+    this.canUpgrade = false,
+  });
+
+  double get progressFraction {
+    if (nextTierRequiredEvents <= 0) return 1.0;
+    return (completedEvents / nextTierRequiredEvents).clamp(0.0, 1.0);
+  }
+
+  factory IslandProgressDto.fromJson(Map<String, dynamic>? json) {
+    if (json == null) return const IslandProgressDto();
+    return IslandProgressDto(
+      completedEvents: (json['completedEvents'] as num?)?.toInt() ?? 0,
+      nextTierRequiredEvents:
+          (json['nextTierRequiredEvents'] as num?)?.toInt() ?? 2,
+      canUpgrade: json['canUpgrade'] as bool? ?? false,
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+    'completedEvents': completedEvents,
+    'nextTierRequiredEvents': nextTierRequiredEvents,
+    'canUpgrade': canUpgrade,
+  };
+}
+
+/// Mô hình tổng quan Đảo Di Sản từ GET /api/v1/me/island.
+@immutable
+class IslandDto {
+  final int tier;
+  final int maxTier;
+  /// row_version từ backend (field: rowVersion). Dùng làm expectedRevision.
+  final int rowVersion;
+  /// EXP tích lũy của tài khoản (không tiêu hao).
+  final int currentExp;
+  /// Level tài khoản hiện tại (backend tính từ EXP).
+  final int currentLevel;
+  /// Level tối thiểu để nâng lên tier kế tiếp (null nếu đã max tier).
+  final int? nextTierRequiredLevel;
+  /// EXP tối thiểu tương ứng với nextTierRequiredLevel (null nếu đã max tier).
+  final int? nextTierRequiredExp;
+  /// Tổng số slot khi nâng lên tier kế tiếp (0 nếu đã max tier).
+  final int nextTierSlotCount;
+  /// Backend xác nhận user có quyền nâng cấp không.
+  final bool canUpgrade;
+  /// Số sự kiện hoàn thành (chỉ còn để tương thích, không dùng xét eligibility).
+  final int eventsCompleted;
+  final List<IslandSlotDto> slots;
+
+  // Kept for backwards compat with mock / old screens that still read progress.
+  // Do NOT use progress.canUpgrade for eligibility — use canUpgrade directly.
+  final IslandProgressDto progress;
+
+  // Layout metadata (ISLAND-03) — data-driven canvas; fallback to 960x720.
+  /// layout_key (e.g. 'heritage-village'). Null nếu backend cũ không trả.
+  final String? layoutCode;
+  /// UUID của layout version. Null nếu backend cũ không trả.
+  final String? layoutVersionId;
+  /// Số version layout. 0 nếu không có.
+  final int layoutVersionNumber;
+  /// Chiều rộng canvas ảo (px logic). Fallback 960.
+  final double canvasWidth;
+  /// Chiều cao canvas ảo (px logic). Fallback 720.
+  final double canvasHeight;
+  /// Theme key cho renderer. Null nếu backend chưa set.
+  final String? themeKey;
+  /// Danh sách vùng đất mở theo Tier.
+  final List<IslandLayoutRegionDto> regions;
+  /// Danh sách scene layers theo render_order.
+  final List<IslandSceneLayerDto> sceneLayers;
+
+  /// V51: metadata 3 cấp đảo (tên, giai đoạn, điều kiện mở khoá).
+  final List<IslandTierInfoDto> tiers;
+  /// Lưới địa hình ô vuông/thoi (Board/Tile) theo phong cách game isometric.
+  final IslandBoardDto? board;
+
+  const IslandDto({
+    this.tier = 1,
+    this.maxTier = 3,
+    this.rowVersion = 0,
+    this.currentExp = 0,
+    this.currentLevel = 1,
+    this.nextTierRequiredLevel,
+    this.nextTierRequiredExp,
+    this.nextTierSlotCount = 0,
+    this.canUpgrade = false,
+    this.eventsCompleted = 0,
+    this.slots = const [],
+    this.progress = const IslandProgressDto(),
+    this.layoutCode,
+    this.layoutVersionId,
+    this.layoutVersionNumber = 0,
+    this.canvasWidth = 960.0,
+    this.canvasHeight = 720.0,
+    this.themeKey,
+    this.regions = const [],
+    this.sceneLayers = const [],
+    this.tiers = const [],
+    this.board,
+  });
+
+  bool get isMaxTier => tier >= maxTier;
+
+  /// Tên chuẩn của từng cấp đảo theo thiết kế 9 màn hình (Đảo Nhỏ / Đảo Vừa / Đảo Lớn).
+  static String tierHeritageName(
+    int tier, [
+    String? nameKey,
+    String? stageLabel,
+  ]) {
+    final nk = (nameKey ?? '').toLowerCase().trim();
+    final sl = (stageLabel ?? '').trim();
+    if (sl == 'Đảo Nhỏ' || sl == 'Đảo Vừa' || sl == 'Đảo Lớn') {
+      return sl;
+    }
+    if (nk == 'tier.small' || nk == 'tier.an_lac' || tier == 1) {
+      return 'Đảo Nhỏ';
+    }
+    if (nk == 'tier.medium' || nk == 'tier.phon_thinh' || tier == 2) {
+      return 'Đảo Vừa';
+    }
+    if (nk == 'tier.grand' || nk == 'tier.truong_ton' || tier == 3) {
+      return 'Đảo Lớn';
+    }
+    return 'Đảo cấp $tier';
+  }
+
+  /// Tên quy mô đảo theo Tier (Đảo Nhỏ / Đảo Vừa / Đảo Lớn).
+  String get tierScaleLabel => tierHeritageName(tier);
+
+  /// Tên quy mô ngắn (Đảo nhỏ / Đảo vừa / Đảo lớn) cho tương thích.
+  String get legacyTierScaleLabel {
+    switch (tier) {
+      case 1:
+        return 'Đảo nhỏ';
+      case 2:
+        return 'Đảo vừa';
+      case 3:
+        return 'Đảo lớn';
+      default:
+        return 'Đảo cấp $tier';
+    }
+  }
+
+  /// Nhãn diện tích lưới ô của một cấp đảo (ví dụ: '6×6 ô', '8×8 ô', '10×10 ô').
+  String tierAreaDimensionLabel(int targetTier) {
+    if (board != null && board!.tiles.isNotEmpty) {
+      final tierTiles =
+          board!.tiles.where((t) => t.unlockTier <= targetTier).toList();
+      if (tierTiles.isNotEmpty) {
+        int minR = 999, maxR = -999, minC = 999, maxC = -999;
+        for (final t in tierTiles) {
+          if (t.row < minR) minR = t.row;
+          if (t.row > maxR) maxR = t.row;
+          if (t.col < minC) minC = t.col;
+          if (t.col > maxC) maxC = t.col;
+        }
+        final rSpan = (maxR - minR + 1).clamp(1, 32);
+        final cSpan = (maxC - minC + 1).clamp(1, 32);
+        return '$rSpan×$cSpan ô';
+      }
+    }
+    switch (targetTier) {
+      case 1:
+        return '6×6 ô';
+      case 2:
+        return '8×8 ô';
+      case 3:
+        return '10×10 ô';
+      default:
+        return '6×6 ô';
+    }
+  }
+
+  /// Lời thoại hướng dẫn ngữ cảnh của trợ lý Rùa đội nón lá theo cấp đảo (Issue #50 AC-1).
+  static String kabiGuideTextForTier(int targetTier) {
+    switch (targetTier) {
+      case 1:
+        return 'Đây là Đảo Nhỏ của bạn! Hãy đặt các vật phẩm để xây dựng hòn đảo theo cách riêng nhé!';
+      case 2:
+        return 'Đây là Đảo Vừa của bạn! Hãy đặt các vật phẩm để xây dựng hòn đảo theo cách riêng nhé!';
+      case 3:
+      default:
+        return 'Đây là Đảo Lớn của bạn! Hãy đặt các vật phẩm để xây dựng hòn đảo theo cách riêng nhé!';
+    }
+  }
+
+  /// Số slot đã mở khóa hiện tại (tính cả điều kiện vùng đất chứa slot đã mở khóa).
+  int get unlockedSlotCount {
+    final regionUnlockByCode = <String, int>{
+      for (final r in regions) r.regionCode: r.unlockTier,
+    };
+    return slots.where((s) {
+      final slotUnlocked = s.unlocked && s.unlockTier <= tier;
+      if (!slotUnlocked) return false;
+      if (s.regionCode != null && regionUnlockByCode.containsKey(s.regionCode)) {
+        return regionUnlockByCode[s.regionCode]! <= tier;
+      }
+      return true;
+    }).length;
+  }
+
+  /// Alias kept for providers that still reference island.revision.
+  int get revision => rowVersion;
+
+  IslandDto copyWith({
+    int? tier,
+    int? maxTier,
+    int? rowVersion,
+    int? currentExp,
+    int? currentLevel,
+    int? nextTierRequiredLevel,
+    int? nextTierRequiredExp,
+    int? nextTierSlotCount,
+    bool? canUpgrade,
+    int? eventsCompleted,
+    List<IslandSlotDto>? slots,
+    IslandProgressDto? progress,
+    String? layoutCode,
+    String? layoutVersionId,
+    int? layoutVersionNumber,
+    double? canvasWidth,
+    double? canvasHeight,
+    String? themeKey,
+    List<IslandLayoutRegionDto>? regions,
+    List<IslandSceneLayerDto>? sceneLayers,
+    List<IslandTierInfoDto>? tiers,
+    IslandBoardDto? board,
+  }) {
+    return IslandDto(
+      tier: tier ?? this.tier,
+      maxTier: maxTier ?? this.maxTier,
+      rowVersion: rowVersion ?? this.rowVersion,
+      currentExp: currentExp ?? this.currentExp,
+      currentLevel: currentLevel ?? this.currentLevel,
+      nextTierRequiredLevel: nextTierRequiredLevel ?? this.nextTierRequiredLevel,
+      nextTierRequiredExp: nextTierRequiredExp ?? this.nextTierRequiredExp,
+      nextTierSlotCount: nextTierSlotCount ?? this.nextTierSlotCount,
+      canUpgrade: canUpgrade ?? this.canUpgrade,
+      eventsCompleted: eventsCompleted ?? this.eventsCompleted,
+      slots: slots ?? this.slots,
+      progress: progress ?? this.progress,
+      layoutCode: layoutCode ?? this.layoutCode,
+      layoutVersionId: layoutVersionId ?? this.layoutVersionId,
+      layoutVersionNumber: layoutVersionNumber ?? this.layoutVersionNumber,
+      canvasWidth: canvasWidth ?? this.canvasWidth,
+      canvasHeight: canvasHeight ?? this.canvasHeight,
+      themeKey: themeKey ?? this.themeKey,
+      regions: regions ?? this.regions,
+      sceneLayers: sceneLayers ?? this.sceneLayers,
+      tiers: tiers ?? this.tiers,
+      board: board ?? this.board,
+    );
+  }
+
+  factory IslandDto.fromJson(Map<String, dynamic> json) {
+    final rawSlots = json['slots'];
+    final rawRegions = json['regions'];
+    final rawLayers = json['sceneLayers'];
+    final rawTiles = json['tiles'];
+    final nextReqLevel = (json['nextTierRequiredLevel'] as num?)?.toInt();
+    final nextReqExp = (json['nextTierRequiredExp'] as num?)?.toInt();
+    final eventsCompleted = (json['eventsCompleted'] as num?)?.toInt() ?? 0;
+    final canUpgrade = json['canUpgrade'] as bool? ?? false;
+
+    final parsedSlots = rawSlots is List
+        ? rawSlots
+            .whereType<Map>()
+            .map((e) => IslandSlotDto.fromJson(e.cast<String, dynamic>()))
+            .toList()
+        : const <IslandSlotDto>[];
+
+    final parsedRegions = rawRegions is List
+        ? rawRegions
+            .whereType<Map>()
+            .map((e) => IslandLayoutRegionDto.fromJson(
+                  e.cast<String, dynamic>()))
+            .toList()
+        : const <IslandLayoutRegionDto>[];
+
+    // Xử lý board (V48): metadata lưới nằm trong `json['board']`, danh sách
+    // tile nằm ở `json['tiles']` cấp ngoài — KHÔNG đọc `board.tiles` (chỉ giữ
+    // cho fixture nội bộ). Sau khi parse, link slot→tile theo `slot.tileKey`.
+    final externalTiles = rawTiles is List
+        ? rawTiles
+            .whereType<Map>()
+            .map((e) => IslandTileDto.fromJson(e.cast<String, dynamic>()))
+            .toList()
+        : const <IslandTileDto>[];
+
+    IslandBoardDto? board;
+    if (json['board'] is Map) {
+      board = IslandBoardDto.fromJson(
+        (json['board'] as Map).cast<String, dynamic>(),
+        externalTiles: externalTiles.isEmpty ? null : externalTiles,
+      );
+      // Link slots vào tiles theo quan hệ tileKey — không suy đoán từ x/y.
+      board = board.linkSlotsToTiles(parsedSlots);
+    } else if (externalTiles.isNotEmpty) {
+      // API cũ trả tiles ngoài nhưng không có metadata board — wrap vào
+      // board mặc định kích thước suy ra từ tiles (không phải mock).
+      int maxR = 0, maxC = 0;
+      for (final t in externalTiles) {
+        if (t.row > maxR) maxR = t.row;
+        if (t.col > maxC) maxC = t.col;
+      }
+      board = IslandBoardDto(
+        rows: maxR + 1,
+        cols: maxC + 1,
+        tiles: externalTiles,
+        fromBackend: true,
+      ).linkSlotsToTiles(parsedSlots);
+    } else {
+      board = IslandBoardDto.buildDefaultBoard(
+        slots: parsedSlots,
+        regions: parsedRegions,
+      ).linkSlotsToTiles(parsedSlots);
+    }
+
+    return IslandDto(
+      tier: (json['tier'] as num?)?.toInt() ?? 1,
+      maxTier: (json['maxTier'] as num?)?.toInt() ?? 3,
+      // Backend field is rowVersion (ISLAND-02); fall back to revision for mock
+      rowVersion: (json['rowVersion'] as num?)?.toInt() ??
+          (json['revision'] as num?)?.toInt() ??
+          0,
+      currentExp: (json['currentExp'] as num?)?.toInt() ?? 0,
+      currentLevel: (json['currentLevel'] as num?)?.toInt() ?? 1,
+      nextTierRequiredLevel: nextReqLevel,
+      nextTierRequiredExp: nextReqExp,
+      nextTierSlotCount: (json['nextTierSlotCount'] as num?)?.toInt() ?? 0,
+      canUpgrade: canUpgrade,
+      eventsCompleted: eventsCompleted,
+      slots: parsedSlots,
+      // Keep progress populated for any code still reading it
+      progress: IslandProgressDto(
+        completedEvents: eventsCompleted,
+        nextTierRequiredEvents:
+            (json['nextTierRequiredEvents'] as num?)?.toInt() ?? 0,
+        canUpgrade: canUpgrade,
+      ),
+      // Layout metadata (ISLAND-03) — null-safe, fallback to defaults
+      layoutCode: json['layoutCode'] as String?,
+      layoutVersionId: json['layoutVersionId'] as String?,
+      layoutVersionNumber:
+          (json['layoutVersionNumber'] as num?)?.toInt() ?? 0,
+      canvasWidth: (json['canvasWidth'] as num?)?.toDouble() ?? 960.0,
+      canvasHeight: (json['canvasHeight'] as num?)?.toDouble() ?? 720.0,
+      themeKey: json['themeKey'] as String?,
+      regions: parsedRegions,
+      sceneLayers: rawLayers is List
+          ? rawLayers
+              .whereType<Map>()
+              .map((e) => IslandSceneLayerDto.fromJson(
+                    e.cast<String, dynamic>()))
+              .toList()
+          : const [],
+      board: board,
+      tiers: (json['tiers'] is List)
+          ? (json['tiers'] as List)
+              .whereType<Map>()
+              .map((e) => IslandTierInfoDto.fromJson(
+                    e.cast<String, dynamic>()))
+              .toList()
+          : const <IslandTierInfoDto>[],
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+    'tier': tier,
+    'maxTier': maxTier,
+    'rowVersion': rowVersion,
+    'currentExp': currentExp,
+    'currentLevel': currentLevel,
+    'nextTierRequiredLevel': nextTierRequiredLevel,
+    'nextTierRequiredExp': nextTierRequiredExp,
+    'canUpgrade': canUpgrade,
+    'eventsCompleted': eventsCompleted,
+    'slots': slots.map((s) => s.toJson()).toList(),
+    if (layoutCode != null) 'layoutCode': layoutCode,
+    if (layoutVersionId != null) 'layoutVersionId': layoutVersionId,
+    'layoutVersionNumber': layoutVersionNumber,
+    'canvasWidth': canvasWidth,
+    'canvasHeight': canvasHeight,
+    if (themeKey != null) 'themeKey': themeKey,
+    if (board != null) 'board': board!.toJson(),
+  };
+}
+
+/// Metadata một cấp đảo Đảo Di Sản (V51): tên, giai đoạn, điều kiện mở khoá.
+@immutable
+class IslandTierInfoDto {
+  final int tier;
+  final String? nameKey;
+  final String? stageLabel;
+  final int slotCount;
+  final int requiredCompletedEvents;
+  final int? requiredLevel;
+  final int? requiredExp;
+  final bool unlocked;
+  final List<String> highlights;
+
+  const IslandTierInfoDto({
+    this.tier = 1,
+    this.nameKey,
+    this.stageLabel,
+    this.slotCount = 12,
+    this.requiredCompletedEvents = 0,
+    this.requiredLevel,
+    this.requiredExp,
+    this.unlocked = false,
+    this.highlights = const [],
+  });
+
+  String get displayName =>
+      IslandDto.tierHeritageName(tier, nameKey, stageLabel);
+  factory IslandTierInfoDto.fromJson(Map<String, dynamic> json) {
+    final rawHighlights = json['highlights'];
+    return IslandTierInfoDto(
+      tier: (json['tier'] as num?)?.toInt() ?? 1,
+      nameKey: json['nameKey'] as String?,
+      stageLabel: json['stageLabel'] as String?,
+      slotCount: (json['slotCount'] as num?)?.toInt() ?? 12,
+      requiredCompletedEvents:
+          (json['requiredCompletedEvents'] as num?)?.toInt() ?? 0,
+      requiredLevel: (json['requiredLevel'] as num?)?.toInt(),
+      requiredExp: (json['requiredExp'] as num?)?.toInt(),
+      unlocked: json['unlocked'] as bool? ?? false,
+      highlights: rawHighlights is List
+          ? rawHighlights.whereType<String>().toList()
+          : const [],
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+    'tier': tier,
+    'nameKey': nameKey,
+    'stageLabel': stageLabel,
+    'slotCount': slotCount,
+    'requiredCompletedEvents': requiredCompletedEvents,
+    'requiredLevel': requiredLevel,
+    'requiredExp': requiredExp,
+    'unlocked': unlocked,
+    'highlights': highlights,
+  };
+}
+
+/// Một mặt hàng trang trí trong cửa hàng Điểm Sử Ký (GET /api/v1/shop/items).
+@immutable
+class ShopItemDto {
+  final String itemId;
+  final String code;
+  final String name;
+  final String? description;
+  final String category;
+  /// Giá tính bằng Điểm Sử Ký. null = chưa mở bán (purchasable=false).
+  final int? pricePoints;
+  /// Backend xác nhận item có thể mua không (active=true và price != null).
+  final bool purchasable;
+  final String? renderKey;
+  final String? assetId;
+  final bool placeable;
+  /// Phản ánh trạng thái sở hữu từ inventory (mock hoặc enriched client-side).
+  /// Backend ShopItemResponse không trả field này — mặc định false từ listing.
+  final bool owned;
+  /// True chỉ khi đã đối chiếu thành công với `/me/inventory`.
+  /// Nếu tải inventory thất bại, `ownershipVerified = false` để khóa nút MUA.
+  final bool ownershipVerified;
+
+  const ShopItemDto({
+    required this.itemId,
+    required this.code,
+    required this.name,
+    this.description,
+    this.category = 'DECOR',
+    this.pricePoints,
+    this.purchasable = false,
+    this.renderKey,
+    this.assetId,
+    this.placeable = true,
+    this.owned = false,
+    this.ownershipVerified = true,
+  });
+
+  /// Tiện ích: giá để hiển thị (0 nếu chưa mở bán).
+  int get price => pricePoints ?? 0;
+
+  /// Vật phẩm chỉ được phép mua khi purchasable = true và có giá > 0.
+  bool get isForSale => purchasable && pricePoints != null && pricePoints! > 0;
+
+  String? get assetPath => resolveIslandAsset(renderKey, code, assetId);
+
+  String? get remoteAssetUrl =>
+      resolveIslandRemoteAssetUrl(assetId) ??
+      resolveIslandRemoteAssetUrl(renderKey);
+
+  ShopItemDto copyWith({bool? owned, bool? ownershipVerified}) {
+    return ShopItemDto(
+      itemId: itemId,
+      code: code,
+      name: name,
+      description: description,
+      category: category,
+      pricePoints: pricePoints,
+      purchasable: purchasable,
+      renderKey: renderKey,
+      assetId: assetId,
+      placeable: placeable,
+      owned: owned ?? this.owned,
+      ownershipVerified: ownershipVerified ?? this.ownershipVerified,
+    );
+  }
+
+  factory ShopItemDto.fromJson(Map<String, dynamic> json) {
+    return ShopItemDto(
+      itemId: json['itemId'] as String? ?? json['id'] as String? ?? '',
+      code: json['code'] as String? ?? '',
+      name: json['name'] as String? ?? '',
+      description: json['description'] as String?,
+      category: json['category'] as String? ?? 'DECOR',
+      // Backend: pricePoints (Long, nullable). Legacy mock may use price.
+      pricePoints: (json['pricePoints'] as num?)?.toInt() ??
+          (json['price'] as num?)?.toInt(),
+      purchasable: json['purchasable'] as bool? ?? false,
+      renderKey: json['renderKey'] as String?,
+      assetId: json['assetId'] as String?,
+      placeable: json['placeable'] as bool? ?? true,
+      // owned không có trong backend listing — default false.
+      owned: json['owned'] as bool? ?? false,
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+    'itemId': itemId,
+    'code': code,
+    'name': name,
+    'description': description,
+    'category': category,
+    'pricePoints': pricePoints,
+    'purchasable': purchasable,
+    'renderKey': renderKey,
+    'assetId': assetId,
+    'placeable': placeable,
+    'owned': owned,
+  };
+}
+
+/// Số dư ví người học (GET /api/v1/me/wallet).
+@immutable
+class WalletDto {
+  final int historyPoints;
+  final int exp;
+
+  const WalletDto({this.historyPoints = 0, this.exp = 0});
+
+  factory WalletDto.fromJson(Map<String, dynamic>? json) {
+    if (json == null) return const WalletDto();
+    return WalletDto(
+      historyPoints:
+          (json['historyPoints'] as num?)?.toInt() ??
+          (json['points'] as num?)?.toInt() ??
+          (json['balance'] as num?)?.toInt() ??
+          0,
+      exp: (json['exp'] as num?)?.toInt() ?? 0,
+    );
+  }
+
+  Map<String, dynamic> toJson() => {'historyPoints': historyPoints, 'exp': exp};
+}

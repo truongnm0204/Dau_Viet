@@ -1,0 +1,400 @@
+package com.dauviet.reward.application;
+
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.UUID;
+import java.util.stream.Collectors;
+
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+import com.dauviet.collection.infrastructure.persistence.UserEvidenceRepository;
+import com.dauviet.common.api.PageResponse;
+import com.dauviet.learning.infrastructure.persistence.LearnerAttemptRepository;
+import com.dauviet.learning.infrastructure.persistence.LessonResultRepository;
+import com.dauviet.lesson.domain.Lesson;
+import com.dauviet.lesson.domain.LessonVersion;
+import com.dauviet.lesson.infrastructure.persistence.LessonRepository;
+import com.dauviet.lesson.infrastructure.persistence.LessonVersionRepository;
+import com.dauviet.reward.api.dto.CatalogItemResponse;
+import com.dauviet.reward.api.dto.InventoryItemResponse;
+import com.dauviet.reward.api.dto.RewardSummaryResponse;
+import com.dauviet.reward.api.dto.RewardTransactionResponse;
+import com.dauviet.reward.domain.ItemCatalog;
+import com.dauviet.reward.domain.ItemUnlockRule;
+import com.dauviet.reward.domain.RewardTransaction;
+import com.dauviet.reward.domain.UserInventoryItem;
+import com.dauviet.reward.infrastructure.persistence.ItemCatalogRepository;
+import com.dauviet.reward.infrastructure.persistence.ItemUnlockRuleRepository;
+import com.dauviet.reward.infrastructure.persistence.RewardTransactionRepository;
+import com.dauviet.reward.infrastructure.persistence.UserInventoryRepository;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+
+/**
+ * Bề mặt đọc phần thưởng/vật phẩm của learner hiện tại (TASK-0023).
+ * Read-only — ghi chỉ từ RewardGrantService/ItemUnlockService trong
+ * transaction runtime. Identity luôn từ JWT ở controller.
+ */
+@Service
+public class RewardService {
+    private final RewardTransactionRepository rewards;
+    private final com.dauviet.wallet.infrastructure.persistence
+            .WalletTransactionRepository walletLedger;
+    private final UserInventoryRepository inventory;
+    private final ItemCatalogRepository items;
+    private final ItemUnlockRuleRepository rules;
+    private final LearnerAttemptRepository attempts;
+    private final LessonVersionRepository versions;
+    private final LessonRepository lessons;
+    private final UserEvidenceRepository userEvidence;
+    private final com.dauviet.collection.infrastructure.persistence
+            .UserEventProgressRepository eventProgress;
+    private final LessonResultRepository lessonResults;
+    private final ItemConditionParser conditionParser;
+    private final ItemRuleEvaluator ruleEvaluator;
+    private final ItemRuleScopeResolver scopeResolver;
+    private final ObjectMapper mapper;
+    private final com.dauviet.island.infrastructure.persistence.UserIslandPlacementRepository placements;
+    private final AccountLevelService levelService;
+
+    public RewardService(RewardTransactionRepository rewards,
+                         com.dauviet.wallet.infrastructure.persistence
+                                 .WalletTransactionRepository walletLedger,
+                         UserInventoryRepository inventory,
+                         ItemCatalogRepository items,
+                         ItemUnlockRuleRepository rules,
+                         LearnerAttemptRepository attempts,
+                         LessonVersionRepository versions,
+                         LessonRepository lessons,
+                         UserEvidenceRepository userEvidence,
+                         com.dauviet.collection.infrastructure.persistence
+                                 .UserEventProgressRepository eventProgress,
+                         LessonResultRepository lessonResults,
+                         ItemConditionParser conditionParser,
+                         ItemRuleEvaluator ruleEvaluator,
+                         ItemRuleScopeResolver scopeResolver,
+                         ObjectMapper mapper,
+                         com.dauviet.island.infrastructure.persistence.UserIslandPlacementRepository placements,
+                         AccountLevelService levelService) {
+        this.rewards = rewards;
+        this.walletLedger = walletLedger;
+        this.inventory = inventory;
+        this.items = items;
+        this.rules = rules;
+        this.attempts = attempts;
+        this.versions = versions;
+        this.lessons = lessons;
+        this.userEvidence = userEvidence;
+        this.eventProgress = eventProgress;
+        this.lessonResults = lessonResults;
+        this.conditionParser = conditionParser;
+        this.ruleEvaluator = ruleEvaluator;
+        this.scopeResolver = scopeResolver;
+        this.mapper = mapper;
+        this.placements = placements;
+        this.levelService = levelService;
+    }
+
+    /**
+     * Tổng EXP / Điểm Lịch sử khả dụng + Level tài khoản.
+     *
+     * <p>historyPoints (QA-19): tính = SUM(HISTORY_POINTS credit từ
+     * reward_transactions) − SUM(wallet DEBIT) — nghĩa là sau khi learner
+     * tiêu điểm ở Viện Thái Y / Cửa hàng Đảo, số hiển thị phản ánh đúng
+     * số dư thực. Clamp 0 để không trả số âm khi bridge chưa chạy hoặc
+     * ledger đang race.
+     */
+    @Transactional(readOnly = true)
+    public RewardSummaryResponse summary(UUID userId) {
+        long exp = rewards.sumAmount(userId, RewardTransaction.TYPE_EXP);
+        int level = levelService.levelForExp(exp);
+        long earned = rewards.sumAmount(userId,
+                RewardTransaction.TYPE_HISTORY_POINTS);
+        long spent = walletLedger.sumDebits(userId);
+        long availablePoints = Math.max(0L, earned - spent);
+        return new RewardSummaryResponse(
+                exp,
+                availablePoints,
+                attempts.countDistinctCompletedLessons(userId),
+                inventory.findByUserIdOrderByAcquiredAtDesc(userId).size(),
+                level);
+    }
+    /** Lịch sử bút toán — mới nhất trước; lessonId resolve qua attempt. */
+    @Transactional(readOnly = true)
+    public PageResponse<RewardTransactionResponse> transactions(
+            UUID userId, Pageable pageable) {
+        Page<RewardTransaction> page =
+                rewards.findByUserIdOrderByCreatedAtDesc(userId, pageable);
+        Map<UUID, UUID> lessonByAttempt = resolveLessons(
+                page.getContent().stream()
+                        .map(RewardTransaction::getLearnerAttemptId)
+                        .collect(Collectors.toSet()));
+        return PageResponse.from(page.map(t -> new RewardTransactionResponse(
+                t.getId(), t.getRewardType(), t.getAmount(), t.getReason(),
+                lessonByAttempt.get(t.getLearnerAttemptId()),
+                t.getCreatedAt())));
+    }
+
+    /** Vật phẩm đã sở hữu — mới nhất trước, kèm metadata catalog + trạng thái đặt trên Đảo Di Sản. */
+    @Transactional(readOnly = true)
+    public List<InventoryItemResponse> inventoryList(UUID userId) {
+        List<UserInventoryItem> owned =
+                inventory.findByUserIdOrderByAcquiredAtDesc(userId);
+        Map<UUID, ItemCatalog> catalog = catalogOf(
+                owned.stream().map(UserInventoryItem::getItemId).toList());
+        Map<UUID, UUID> slotByItem = placements.findByUserId(userId).stream()
+                .collect(java.util.stream.Collectors.toMap(
+                        com.dauviet.island.domain.UserIslandPlacement::getItemId,
+                        com.dauviet.island.domain.UserIslandPlacement::getSlotId,
+                        (existing, replacement) -> existing));
+        return owned.stream().map(o -> {
+            ItemCatalog item = catalog.get(o.getItemId());
+            return new InventoryItemResponse(
+                    o.getItemId(),
+                    item == null ? null : item.getCode(),
+                    item == null ? null : item.getName(),
+                    item == null ? "" : item.getDescription(),
+                    item == null ? null : item.getCategory(),
+                    item == null ? null : item.getItemType(),
+                    item == null ? null : item.getRarity(),
+                    item == null ? null : item.getAssetId(),
+                    o.getAcquiredAt(), o.getAcquisitionSource(),
+                    o.getSourceLessonId(), o.getUnlockRuleId(),
+                    o.getUnlockRuleVersion(), o.getSourceEventId(),
+                    item != null && item.isPlaceable(),
+                    item == null ? null : item.getRenderKey(),
+                    slotByItem.get(o.getItemId()));
+        }).toList();
+    }
+
+    /**
+     * Catalog cho learner = union item đang active + item learner đã sở
+     * hữu (dedupe theo item id, sort theo code). Item admin tắt sau khi
+     * learner đã sở hữu vẫn hiển thị với owned=true — ownership không bao
+     * giờ bị thu hồi; item inactive không sở hữu vẫn ẩn.
+     */
+    @Transactional(readOnly = true)
+    public List<CatalogItemResponse> catalog(UUID userId) {
+        List<ItemCatalog> active = items.findByActiveTrueOrderByCodeAsc();
+        List<UserInventoryItem> owned =
+                inventory.findByUserIdOrderByAcquiredAtDesc(userId);
+        Map<UUID, UserInventoryItem> ownedByItem = owned.stream()
+                .collect(Collectors.toMap(UserInventoryItem::getItemId,
+                        java.util.function.Function.identity()));
+        // Union: active ∪ owned-inactive, dedupe theo itemId.
+        Map<UUID, ItemCatalog> union = new java.util.LinkedHashMap<>();
+        for (ItemCatalog i : active) union.put(i.getId(), i);
+        for (UserInventoryItem o : owned) {
+            union.computeIfAbsent(o.getItemId(),
+                    id -> items.findById(id).orElse(null));
+        }
+        List<ItemCatalog> all = union.values().stream()
+                .filter(java.util.Objects::nonNull)
+                .sorted(java.util.Comparator.comparing(ItemCatalog::getCode))
+                .toList();
+        // Evaluation context dùng chung cho mọi item — cache một lần,
+        // không N+1 dù catalog nhiều item.
+        ItemRuleEvaluationContext ctx = new ItemRuleEvaluationContext(userId,
+                userEvidence, eventProgress, attempts, lessonResults);
+        Map<UUID, String> lessonTitles = lessonTitlesOf(
+                all.stream()
+                        .map(i -> rules.findByItemIdAndActiveTrue(i.getId())
+                                .map(ItemUnlockRule::getLessonId).orElse(null))
+                        .filter(java.util.Objects::nonNull)
+                        .collect(Collectors.toSet()));
+        Map<UUID, UUID> slotByItem = placements.findByUserId(userId).stream()
+                .collect(java.util.stream.Collectors.toMap(
+                        com.dauviet.island.domain.UserIslandPlacement::getItemId,
+                        com.dauviet.island.domain.UserIslandPlacement::getSlotId,
+                        (existing, replacement) -> existing));
+        return all.stream().map(i -> {
+            UserInventoryItem ownedRow = ownedByItem.get(i.getId());
+            return new CatalogItemResponse(
+                    i.getId(), i.getCode(), i.getName(), i.getDescription(),
+                    i.getCategory(), i.getItemType(), i.getRarity(),
+                    i.getAssetId(), i.getRenderKey(), i.isPlaceable(),
+                    slotByItem.get(i.getId()),
+                    parse(i.getSourceMetadata()),
+                    ownedRow != null,
+                    ownedRow == null ? null : ownedRow.getAcquiredAt(),
+                    requirement(i, ctx, lessonTitles));
+        }).toList();
+    }
+
+    /**
+     * Vật phẩm một attempt đã kích hoạt — enrich GET /attempts/{id}/result
+     * (additive, không thay shape hiện tại).
+     */
+    @Transactional(readOnly = true)
+    public List<InventoryItemResponse> itemsUnlockedByAttempt(UUID attemptId) {
+        // Chỉ tính unlock THỜI GIAN THỰC: row ADMIN_GRANT ghi bởi reconcile
+        // sau này trỏ source_attempt_id về một attempt đã hoàn thành trước
+        // — không được coi là "vừa mở khóa trong lượt học đó".
+        List<UserInventoryItem> rows =
+                inventory.findRealtimeUnlocksByAttempt(attemptId);
+        Map<UUID, ItemCatalog> catalog = catalogOf(
+                rows.stream().map(UserInventoryItem::getItemId).toList());
+        return rows.stream().map(o -> {
+            ItemCatalog item = catalog.get(o.getItemId());
+            return new InventoryItemResponse(
+                    o.getItemId(),
+                    item == null ? null : item.getCode(),
+                    item == null ? null : item.getName(),
+                    item == null ? "" : item.getDescription(),
+                    item == null ? null : item.getCategory(),
+                    item == null ? null : item.getItemType(),
+                    item == null ? null : item.getRarity(),
+                    item == null ? null : item.getAssetId(),
+                    o.getAcquiredAt(), o.getAcquisitionSource(),
+                    o.getSourceLessonId(), o.getUnlockRuleId(),
+                    o.getUnlockRuleVersion(), o.getSourceEventId(),
+                    item != null && item.isPlaceable(),
+                    item == null ? null : item.getRenderKey(),
+                    null);
+        }).toList();
+    }
+
+    /**
+     * Bút toán thưởng gắn attempt — cho result screen hiển thị EXP/điểm
+     * vừa nhận (đã grant từ trước thì vẫn trả row gốc, không bịa).
+     */
+    @Transactional(readOnly = true)
+    public List<RewardTransactionResponse> rewardsOfAttempt(UUID attemptId) {
+        List<RewardTransaction> rows =
+                rewards.findByLearnerAttemptId(attemptId);
+        Map<UUID, UUID> lessonByAttempt = resolveLessons(
+                rows.stream().map(RewardTransaction::getLearnerAttemptId)
+                        .collect(Collectors.toSet()));
+        return rows.stream().map(t -> new RewardTransactionResponse(
+                t.getId(), t.getRewardType(), t.getAmount(), t.getReason(),
+                lessonByAttempt.get(t.getLearnerAttemptId()),
+                t.getCreatedAt())).toList();
+    }
+
+    /* ---------- internals ---------- */
+
+    /**
+     * Điều kiện mở khóa + tiến độ của item (GAME-05): parse condition_json
+     * của active rule → evaluator trả cây status → map sang Requirement
+     * tree. Rule v1 đã được V24 normalize sang condition_json tương đương
+     * nên đi chung một đường; rule không parse được trả null (client hiển
+     * thị "chưa cấu hình").
+     *
+     * FIX-1: rule bị audit-flag 'needs-mapping' (grant path đã chặn qua
+     * cùng {@link ItemUnlockRule#isNeedsMapping}) → trả root status
+     * UNCONFIGURED + satisfied=false + mô tả trung lập — KHÔNG để
+     * evaluator v1 đếm global báo satisfied giả (learner thấy "đã đủ
+     * điều kiện" nhưng không bao giờ được cấp). Khi admin publish rule
+     * v2 hợp lệ, active rule mới không còn flag → status tự biến mất.
+     */
+    private CatalogItemResponse.Requirement requirement(
+            ItemCatalog item, ItemRuleEvaluationContext ctx,
+            Map<UUID, String> lessonTitles) {
+        // FINAL FIX-2: scope cấp item UNRESOLVED (audit trail, không chỉ cờ
+        // trên rule active) → UNCONFIGURED dù admin vừa setRule global mới.
+        if (scopeResolver.scopeOf(item.getId())
+                == ItemUnlockRule.ItemScope.UNRESOLVED) {
+            return unconfiguredRequirement();
+        }
+        return rules.findByItemIdAndActiveTrue(item.getId())
+                .map(r -> {
+                    if (ItemUnlockRule.isNeedsMapping(r.getRuleMetadata())) {
+                        return unconfiguredRequirement();
+                    }
+                    try {
+                        ItemCondition condition = conditionParser.parse(
+                                r.getConditionJson() != null
+                                        && !r.getConditionJson().isBlank()
+                                        ? r.getConditionJson()
+                                        : legacyConditionJson(r));
+                        ItemRuleEvaluator.Evaluation ev =
+                                ruleEvaluator.evaluate(condition, ctx);
+                        return toRequirement(ev.root(), lessonTitles);
+                    } catch (ItemRuleException e) {
+                        return null;
+                    }
+                })
+                .orElse(null);
+    }
+
+    /** Root UNCONFIGURED — không children, không progress bar giả. */
+    private CatalogItemResponse.Requirement unconfiguredRequirement() {
+        return new CatalogItemResponse.Requirement(
+                null, null, null, null, null, null,
+                null, null, null,
+                false, "UNCONFIGURED",
+                "Điều kiện mở khóa đang được cập nhật",
+                List.of());
+    }
+
+    /** condition_json null (row v1 ghi tay) → AST tương đương cột phẳng. */
+    private String legacyConditionJson(ItemUnlockRule r) {
+        return switch (r.getRuleType()) {
+            case ItemUnlockRule.TYPE_LESSON_COMPLETED ->
+                    "{\"type\":\"LESSON_COMPLETED\",\"lessonId\":\""
+                            + r.getLessonId() + "\"}";
+            default -> "{\"type\":\"" + r.getRuleType()
+                    + "\",\"threshold\":" + r.getThreshold() + "}";
+        };
+    }
+
+    private CatalogItemResponse.Requirement toRequirement(
+            ItemRuleEvaluator.ConditionStatus node,
+            Map<UUID, String> lessonTitles) {
+        boolean operator = node.children() != null && !node.children().isEmpty();
+        return new CatalogItemResponse.Requirement(
+                operator ? node.node() : null,
+                node.type() == null ? null : node.type().name(),
+                node.eventId(), node.lessonId(),
+                node.lessonId() == null ? null
+                        : lessonTitles.get(node.lessonId()),
+                node.evidenceIds() == null || node.evidenceIds().isEmpty()
+                        ? null : node.evidenceIds(),
+                node.threshold(), node.current(), node.required(),
+                node.satisfied(), node.status(), node.description(),
+                operator ? node.children().stream()
+                        .map(ch -> toRequirement(ch, lessonTitles)).toList()
+                        : List.of());
+    }
+
+    private Map<UUID, UUID> resolveLessons(Set<UUID> attemptIds) {
+        if (attemptIds.isEmpty()) return Map.of();
+        Map<UUID, UUID> versionByAttempt = new HashMap<>();
+        attempts.findAllById(attemptIds).forEach(a ->
+                versionByAttempt.put(a.getId(), a.getLessonVersionId()));
+        Map<UUID, UUID> lessonByVersion = new HashMap<>();
+        versions.findAllById(versionByAttempt.values()).forEach(v ->
+                lessonByVersion.put(v.getId(), v.getLessonId()));
+        Map<UUID, UUID> out = new HashMap<>();
+        versionByAttempt.forEach((attempt, version) ->
+                out.put(attempt, lessonByVersion.get(version)));
+        return out;
+    }
+
+    private Map<UUID, ItemCatalog> catalogOf(List<UUID> itemIds) {
+        if (itemIds.isEmpty()) return Map.of();
+        return items.findAllById(itemIds).stream()
+                .collect(Collectors.toMap(ItemCatalog::getId,
+                        java.util.function.Function.identity()));
+    }
+
+    private Map<UUID, String> lessonTitlesOf(Set<UUID> lessonIds) {
+        if (lessonIds.isEmpty()) return Map.of();
+        return lessons.findAllById(lessonIds).stream()
+                .collect(Collectors.toMap(Lesson::getId, Lesson::getTitle));
+    }
+
+    private JsonNode parse(String json) {
+        if (json == null || json.isBlank()) return null;
+        try {
+            return mapper.readTree(json);
+        } catch (Exception e) {
+            return null; // metadata chỉ phục vụ hiển thị
+        }
+    }
+}

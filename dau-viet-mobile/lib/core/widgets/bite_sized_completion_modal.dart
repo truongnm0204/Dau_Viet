@@ -5,7 +5,10 @@ import '../theme/dau_viet_typography.dart';
 import 'dong_son_button.dart';
 import 'gold_confetti_overlay.dart';
 
-/// Modal tổng kết nhanh sau mỗi hoạt động học tập (Bite-sized Completion Modal) chuẩn Duolingo
+/// Modal tổng kết nhanh sau mỗi hoạt động học tập (Bite-sized Completion Modal) chuẩn Duolingo.
+/// LƯU Ý: `multiplier` chỉ là nhãn hiển thị — Reward Engine KHÔNG có hệ số
+/// nhân Điểm Sử Ký/EXP (mọi first-completion grant +100 EXP / +50 Sử Ký
+/// phẳng). Không truyền giá trị > 1.0 từ call-site.
 /// Cung cấp vòng lặp tưởng thưởng phấn khích:
 /// - Huy hiệu chiến công nảy lên (Spring scale animation)
 /// - Âm thanh mở rương / chiến thắng cổ điển
@@ -31,7 +34,7 @@ class BiteSizedCompletionModal extends StatefulWidget {
     required this.xpPoints,
     this.accuracy = 1.0,
     this.streakCount = 3,
-    this.multiplier = 1.5,
+    this.multiplier = 1.0,
     this.badgeAsset = 'assets/badges/badge_trace_1_context.png',
     required this.onContinue,
   });
@@ -45,7 +48,7 @@ class BiteSizedCompletionModal extends StatefulWidget {
     required int xpPoints,
     double accuracy = 1.0,
     int streakCount = 3,
-    double multiplier = 1.5,
+    double multiplier = 1.0,
     String badgeAsset = 'assets/badges/badge_trace_1_context.png',
     required VoidCallback onContinue,
   }) {
@@ -71,7 +74,8 @@ class BiteSizedCompletionModal extends StatefulWidget {
   }
 
   @override
-  State<BiteSizedCompletionModal> createState() => _BiteSizedCompletionModalState();
+  State<BiteSizedCompletionModal> createState() =>
+      _BiteSizedCompletionModalState();
 }
 
 class _BiteSizedCompletionModalState extends State<BiteSizedCompletionModal>
@@ -135,10 +139,7 @@ class _BiteSizedCompletionModalState extends State<BiteSizedCompletionModal>
             decoration: BoxDecoration(
               color: DauVietColors.parchmentSurface,
               borderRadius: BorderRadius.circular(24),
-              border: Border.all(
-                color: DauVietColors.imperialGold,
-                width: 2.5,
-              ),
+              border: Border.all(color: DauVietColors.imperialGold, width: 2.5),
               boxShadow: const [
                 BoxShadow(
                   color: Color(0x40613B28),
@@ -175,7 +176,9 @@ class _BiteSizedCompletionModalState extends State<BiteSizedCompletionModal>
                           shape: BoxShape.circle,
                           boxShadow: [
                             BoxShadow(
-                              color: DauVietColors.imperialGold.withValues(alpha: 0.4),
+                              color: DauVietColors.imperialGold.withValues(
+                                alpha: 0.4,
+                              ),
                               blurRadius: 30,
                               spreadRadius: 10,
                             ),
@@ -238,9 +241,14 @@ class _BiteSizedCompletionModalState extends State<BiteSizedCompletionModal>
                   children: [
                     // Tỉ lệ chính xác
                     Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 10,
+                        vertical: 5,
+                      ),
                       decoration: BoxDecoration(
-                        color: DauVietColors.natureGreen.withValues(alpha: 0.15),
+                        color: DauVietColors.natureGreen.withValues(
+                          alpha: 0.15,
+                        ),
                         borderRadius: BorderRadius.circular(20),
                         border: Border.all(
                           color: DauVietColors.natureGreen,
@@ -270,7 +278,10 @@ class _BiteSizedCompletionModalState extends State<BiteSizedCompletionModal>
                     // Chuỗi hào khí
                     if (widget.streakCount > 0)
                       Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 10,
+                          vertical: 5,
+                        ),
                         decoration: BoxDecoration(
                           color: const Color(0xFFFFF3E0),
                           borderRadius: BorderRadius.circular(20),
@@ -304,7 +315,10 @@ class _BiteSizedCompletionModalState extends State<BiteSizedCompletionModal>
 
                 // 5. Thẻ thống kê phần thưởng với hiệu ứng số chạy tăng dần
                 Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 16,
+                    vertical: 14,
+                  ),
                   decoration: BoxDecoration(
                     color: DauVietColors.parchmentContainer,
                     borderRadius: BorderRadius.circular(16),
@@ -329,15 +343,19 @@ class _BiteSizedCompletionModalState extends State<BiteSizedCompletionModal>
                                 ),
                                 const SizedBox(width: 6),
                                 TweenAnimationBuilder<int>(
-                                  tween: IntTween(begin: 0, end: widget.scorePoints),
+                                  tween: IntTween(
+                                    begin: 0,
+                                    end: widget.scorePoints,
+                                  ),
                                   duration: const Duration(milliseconds: 900),
                                   builder: (context, val, child) {
                                     return Text(
                                       '+$val',
-                                      style: DauVietTypography.headlineSmall.copyWith(
-                                        color: DauVietColors.cinnabarRed,
-                                        fontWeight: FontWeight.w900,
-                                      ),
+                                      style: DauVietTypography.headlineSmall
+                                          .copyWith(
+                                            color: DauVietColors.cinnabarRed,
+                                            fontWeight: FontWeight.w900,
+                                          ),
                                     );
                                   },
                                 ),
@@ -378,15 +396,19 @@ class _BiteSizedCompletionModalState extends State<BiteSizedCompletionModal>
                                 ),
                                 const SizedBox(width: 6),
                                 TweenAnimationBuilder<int>(
-                                  tween: IntTween(begin: 0, end: widget.xpPoints),
+                                  tween: IntTween(
+                                    begin: 0,
+                                    end: widget.xpPoints,
+                                  ),
                                   duration: const Duration(milliseconds: 900),
                                   builder: (context, val, child) {
                                     return Text(
                                       '+$val',
-                                      style: DauVietTypography.headlineSmall.copyWith(
-                                        color: const Color(0xFF0D47A1),
-                                        fontWeight: FontWeight.w900,
-                                      ),
+                                      style: DauVietTypography.headlineSmall
+                                          .copyWith(
+                                            color: const Color(0xFF0D47A1),
+                                            fontWeight: FontWeight.w900,
+                                          ),
                                     );
                                   },
                                 ),

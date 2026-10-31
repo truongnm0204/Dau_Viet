@@ -6,6 +6,7 @@ import '../../../core/theme/dau_viet_typography.dart';
 import '../../../core/widgets/bite_sized_completion_modal.dart';
 import '../../../core/widgets/combo_streak_badge_widget.dart';
 import '../../../core/widgets/dong_son_button.dart';
+import '../../../core/widgets/energy_pill.dart';
 import '../../../core/widgets/gold_confetti_overlay.dart';
 import '../../../core/widgets/shimmer_progress_bar.dart';
 import '../../../core/widgets/sound_toggle_button.dart';
@@ -17,7 +18,8 @@ class ChronologicalOrderScreen extends StatefulWidget {
   const ChronologicalOrderScreen({super.key});
 
   @override
-  State<ChronologicalOrderScreen> createState() => _ChronologicalOrderScreenState();
+  State<ChronologicalOrderScreen> createState() =>
+      _ChronologicalOrderScreenState();
 }
 
 class _ChronologicalOrderScreenState extends State<ChronologicalOrderScreen> {
@@ -40,22 +42,26 @@ class _ChronologicalOrderScreenState extends State<ChronologicalOrderScreen> {
       {
         'id': 'step_invade',
         'title': 'Địch Vượt Cửa Biển',
-        'text': 'Đạo thủy quân Nam Hán do Hoằng Tháo chỉ huy vượt biển hùng hổ tiến vào cửa sông Bạch Đằng.',
+        'text':
+            'Đạo thủy quân Nam Hán do Hoằng Tháo chỉ huy vượt biển hùng hổ tiến vào cửa sông Bạch Đằng.',
       },
       {
         'id': 'step_prepare',
         'title': 'Chuẩn Bị Cọc Ngầm',
-        'text': 'Ngô Quyền họp bàn kế sách, quân dân bí mật đốn gỗ lim vót nhọn bịt sắt cắm ngầm lúc triều rút.',
+        'text':
+            'Ngô Quyền họp bàn kế sách, quân dân bí mật đốn gỗ lim vót nhọn bịt sắt cắm ngầm lúc triều rút.',
       },
       {
         'id': 'step_victory',
         'title': 'Tổng Phản Công Đại Thắng',
-        'text': 'Triều rút xiết, cọc gỗ nhô lên đâm thủng vỡ thuyền giặc, quân ta quật lại tiêu diệt hoàn toàn quân thù.',
+        'text':
+            'Triều rút xiết, cọc gỗ nhô lên đâm thủng vỡ thuyền giặc, quân ta quật lại tiêu diệt hoàn toàn quân thù.',
       },
       {
         'id': 'step_lure',
         'title': 'Khiêu Chiến & Nhử Địch',
-        'text': 'Thuyền nhẹ quân ta ra khiêu chiến rồi giả thua rút chạy, nhử thuyền địch vượt qua bãi cọc lúc triều dâng.',
+        'text':
+            'Thuyền nhẹ quân ta ra khiêu chiến rồi giả thua rút chạy, nhử thuyền địch vượt qua bãi cọc lúc triều dâng.',
       },
     ];
   }
@@ -106,10 +112,7 @@ class _ChronologicalOrderScreenState extends State<ChronologicalOrderScreen> {
             gradient: LinearGradient(
               begin: Alignment.topCenter,
               end: Alignment.bottomCenter,
-              colors: [
-                DauVietColors.parchmentSurface,
-                Color(0xFFFAF2E4),
-              ],
+              colors: [DauVietColors.parchmentSurface, Color(0xFFFAF2E4)],
             ),
           ),
           child: SafeArea(
@@ -120,7 +123,10 @@ class _ChronologicalOrderScreenState extends State<ChronologicalOrderScreen> {
 
                 // 2. Thanh tiến độ lướt sáng hoàng kim Duolingo
                 Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 16,
+                    vertical: 6,
+                  ),
                   child: ShimmerProgressBar(
                     progress: _isSubmitted && _isOrderCorrect
                         ? 1.0
@@ -135,7 +141,10 @@ class _ChronologicalOrderScreenState extends State<ChronologicalOrderScreen> {
                 // 3. Nội dung cuộn chính
                 Expanded(
                   child: SingleChildScrollView(
-                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 16,
+                      vertical: 10,
+                    ),
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
@@ -147,74 +156,81 @@ class _ChronologicalOrderScreenState extends State<ChronologicalOrderScreen> {
                         _buildReorderableList(),
                         const SizedBox(height: 16),
 
-                      // 5. Khung Phản Hồi Sau Khi Nộp
-                      if (_isSubmitted) ...[
-                        _buildFeedbackCard(),
+                        // 5. Khung Phản Hồi Sau Khi Nộp
+                        if (_isSubmitted) ...[
+                          _buildFeedbackCard(),
+                          const SizedBox(height: 16),
+                        ],
+
+                        // 6. Nút Hành Động
+                        if (!_isSubmitted)
+                          DongSonButton(
+                            label: 'KIỂM TRA THỨ TỰ NIÊN ĐẠI',
+                            icon: Icons.check_circle_outline_rounded,
+                            variant: DongSonButtonVariant.primaryCinnabar,
+                            height: 52,
+                            onPressed: () {
+                              setState(() {
+                                _isSubmitted = true;
+                              });
+                              if (_isOrderCorrect) {
+                                DauVietAudioService.instance.playCorrect();
+                                DauVietAudioService.instance.playStreakUp();
+                              } else {
+                                DauVietAudioService.instance.playWrong();
+                              }
+                            },
+                          )
+                        else
+                          DongSonButton(
+                            label: _isOrderCorrect
+                                ? 'HOÀN THÀNH DẤU VẾT 3 & TIẾP TỤC (M-08) ›'
+                                : 'SẮP XẾP LẠI THỨ TỰ',
+                            icon: _isOrderCorrect
+                                ? Icons.arrow_forward_rounded
+                                : Icons.replay_rounded,
+                            variant: DongSonButtonVariant.primaryCinnabar,
+                            height: 52,
+                            onPressed: () {
+                              if (_isOrderCorrect) {
+                                BiteSizedCompletionModal.show(
+                                  context: context,
+                                  title: 'NIÊN BIỂU CHÍNH XÁC!',
+                                  subtitle:
+                                      'Bạn đã nắm vững toàn bộ 4 giai đoạn chiến dịch Bạch Đằng từ chuẩn bị đến toàn thắng!',
+                                  scorePoints: 150,
+                                  xpPoints: 80,
+                                  accuracy: 1.0,
+                                  streakCount: 5,
+                                  badgeAsset:
+                                      'assets/badges/badge_trace_3_tactics.png',
+                                  onContinue: () {
+                                    if (context.canPop()) {
+                                      context.pop();
+                                    } else {
+                                      context.go('/traces/evt_bach_dang_938');
+                                    }
+                                  },
+                                );
+                              } else {
+                                setState(() {
+                                  _isSubmitted = false;
+                                });
+                              }
+                            },
+                          ),
                         const SizedBox(height: 16),
                       ],
-
-                      // 6. Nút Hành Động
-                      if (!_isSubmitted)
-                        DongSonButton(
-                          label: 'KIỂM TRA THỨ TỰ NIÊN ĐẠI',
-                          icon: Icons.check_circle_outline_rounded,
-                          variant: DongSonButtonVariant.primaryCinnabar,
-                          height: 52,
-                          onPressed: () {
-                            setState(() {
-                              _isSubmitted = true;
-                            });
-                            if (_isOrderCorrect) {
-                              DauVietAudioService.instance.playCorrect();
-                              DauVietAudioService.instance.playStreakUp();
-                            } else {
-                              DauVietAudioService.instance.playWrong();
-                            }
-                          },
-                        )
-                      else
-                        DongSonButton(
-                          label: _isOrderCorrect
-                              ? 'HOÀN THÀNH DẤU VẾT 3 & TIẾP TỤC (M-08) ›'
-                              : 'SẮP XẾP LẠI THỨ TỰ',
-                          icon: _isOrderCorrect ? Icons.arrow_forward_rounded : Icons.replay_rounded,
-                          variant: DongSonButtonVariant.primaryCinnabar,
-                          height: 52,
-                          onPressed: () {
-                            if (_isOrderCorrect) {
-                              BiteSizedCompletionModal.show(
-                                context: context,
-                                title: 'NIÊN BIỂU CHÍNH XÁC!',
-                                subtitle: 'Bạn đã nắm vững toàn bộ 4 giai đoạn chiến dịch Bạch Đằng từ chuẩn bị đến toàn thắng!',
-                                scorePoints: 150,
-                                xpPoints: 80,
-                                accuracy: 1.0,
-                                streakCount: 5,
-                                multiplier: 2.0,
-                                badgeAsset: 'assets/badges/badge_trace_3_tactics.png',
-                                onContinue: () {
-                                  context.go('/traces/evt_bach_dang_938');
-                                },
-                              );
-                            } else {
-                              setState(() {
-                                _isSubmitted = false;
-                              });
-                            }
-                          },
-                        ),
-                      const SizedBox(height: 16),
-                    ],
+                    ),
                   ),
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
         ),
       ),
-    ),
-  );
-}
+    );
+  }
 
   // Header đỉnh trang
   Widget _buildTopBar(BuildContext context) {
@@ -238,7 +254,7 @@ class _ChronologicalOrderScreenState extends State<ChronologicalOrderScreen> {
               if (context.canPop()) {
                 context.pop();
               } else {
-                context.go('/traces/evt_bach_dang_938');
+                context.go('/dashboard');
               }
             },
           ),
@@ -250,7 +266,10 @@ class _ChronologicalOrderScreenState extends State<ChronologicalOrderScreen> {
                 Row(
                   children: [
                     Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 6,
+                        vertical: 2,
+                      ),
                       decoration: BoxDecoration(
                         color: DauVietColors.cinnabarRed,
                         borderRadius: BorderRadius.circular(4),
@@ -290,10 +309,13 @@ class _ChronologicalOrderScreenState extends State<ChronologicalOrderScreen> {
           ),
           const SoundToggleButton(),
           const SizedBox(width: 8),
-          const ComboStreakBadgeWidget(
-            streakCount: 5,
-            multiplier: 2.0,
+          const EnergyPill(
+            energy: 100,
+            maxEnergy: 100,
+            showHistoryPoints: false,
           ),
+          const SizedBox(width: 8),
+          const ComboStreakBadgeWidget(streakCount: 5),
         ],
       ),
     );
@@ -310,7 +332,11 @@ class _ChronologicalOrderScreenState extends State<ChronologicalOrderScreen> {
       ),
       child: Row(
         children: [
-          const Icon(Icons.swap_vert_rounded, color: DauVietColors.cinnabarRed, size: 22),
+          const Icon(
+            Icons.swap_vert_rounded,
+            color: DauVietColors.cinnabarRed,
+            size: 22,
+          ),
           const SizedBox(width: 10),
           Expanded(
             child: Text(
@@ -423,24 +449,38 @@ class _ChronologicalOrderScreenState extends State<ChronologicalOrderScreen> {
                         child: Icon(
                           Icons.keyboard_arrow_up_rounded,
                           size: 20,
-                          color: index > 0 ? DauVietColors.cinnabarRed : Colors.black12,
+                          color: index > 0
+                              ? DauVietColors.cinnabarRed
+                              : Colors.black12,
                         ),
                       ),
-                      const Icon(Icons.drag_handle_rounded, size: 20, color: DauVietColors.inkMuted),
+                      const Icon(
+                        Icons.drag_handle_rounded,
+                        size: 20,
+                        color: DauVietColors.inkMuted,
+                      ),
                       GestureDetector(
-                        onTap: index < _items.length - 1 ? () => _moveDown(index) : null,
+                        onTap: index < _items.length - 1
+                            ? () => _moveDown(index)
+                            : null,
                         child: Icon(
                           Icons.keyboard_arrow_down_rounded,
                           size: 20,
-                          color: index < _items.length - 1 ? DauVietColors.cinnabarRed : Colors.black12,
+                          color: index < _items.length - 1
+                              ? DauVietColors.cinnabarRed
+                              : Colors.black12,
                         ),
                       ),
                     ],
                   )
                 else
                   Icon(
-                    isCorrectPosition ? Icons.check_circle_rounded : Icons.cancel_rounded,
-                    color: isCorrectPosition ? DauVietColors.natureGreen : DauVietColors.cinnabarRed,
+                    isCorrectPosition
+                        ? Icons.check_circle_rounded
+                        : Icons.cancel_rounded,
+                    color: isCorrectPosition
+                        ? DauVietColors.natureGreen
+                        : DauVietColors.cinnabarRed,
                     size: 22,
                   ),
               ],
@@ -456,10 +496,14 @@ class _ChronologicalOrderScreenState extends State<ChronologicalOrderScreen> {
     return Container(
       padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
-        color: _isOrderCorrect ? const Color(0xFFEAF5EE) : const Color(0xFFFDEEEC),
+        color: _isOrderCorrect
+            ? const Color(0xFFEAF5EE)
+            : const Color(0xFFFDEEEC),
         borderRadius: BorderRadius.circular(12),
         border: Border.all(
-          color: _isOrderCorrect ? DauVietColors.natureGreen : DauVietColors.cinnabarRed,
+          color: _isOrderCorrect
+              ? DauVietColors.natureGreen
+              : DauVietColors.cinnabarRed,
           width: 1.5,
         ),
       ),
@@ -468,7 +512,9 @@ class _ChronologicalOrderScreenState extends State<ChronologicalOrderScreen> {
         children: [
           Icon(
             _isOrderCorrect ? Icons.stars_rounded : Icons.info_outline_rounded,
-            color: _isOrderCorrect ? DauVietColors.natureGreen : DauVietColors.cinnabarRed,
+            color: _isOrderCorrect
+                ? DauVietColors.natureGreen
+                : DauVietColors.cinnabarRed,
             size: 24,
           ),
           const SizedBox(width: 10),
@@ -477,10 +523,14 @@ class _ChronologicalOrderScreenState extends State<ChronologicalOrderScreen> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  _isOrderCorrect ? 'TUYỆT VỜI! ĐÚNG TRÌNH TỰ CHIẾN THUẬT' : 'CHƯA ĐÚNG TRÌNH TỰ THỜI GIAN',
+                  _isOrderCorrect
+                      ? 'TUYỆT VỜI! ĐÚNG TRÌNH TỰ CHIẾN THUẬT'
+                      : 'CHƯA ĐÚNG TRÌNH TỰ THỜI GIAN',
                   style: DauVietTypography.labelSmall.copyWith(
                     fontWeight: FontWeight.w800,
-                    color: _isOrderCorrect ? DauVietColors.natureGreen : DauVietColors.cinnabarRed,
+                    color: _isOrderCorrect
+                        ? DauVietColors.natureGreen
+                        : DauVietColors.cinnabarRed,
                   ),
                 ),
                 const SizedBox(height: 4),

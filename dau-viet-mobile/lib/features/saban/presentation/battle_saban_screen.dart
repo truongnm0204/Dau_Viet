@@ -1,22 +1,27 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import '../../../core/api/api_config.dart';
 import '../../../core/theme/dau_viet_colors.dart';
 import '../../../core/theme/dau_viet_typography.dart';
 import '../../../core/widgets/dong_son_button.dart';
+import '../../../core/widgets/main_bottom_nav.dart';
 import '../../../core/widgets/parchment_card.dart';
 import '../../../mock/data/mock_saban_data.dart';
 import '../../../mock/models/saban_models.dart';
+import '../../../mock/models/timeline_models.dart';
+import '../../events/data/events_providers.dart';
 
 /// Màn hình M-06: Sa Bàn Chiến Thuật & Bản Đồ Thủy Chiến Sông Bạch Đằng (Battle Saban Screen)
 /// Khớp 100% với đặc tả trong MOBILE_SCREEN_DESIGN.md & ART_DIRECTION.md
-class BattleSabanScreen extends StatefulWidget {
+class BattleSabanScreen extends ConsumerStatefulWidget {
   const BattleSabanScreen({super.key});
 
   @override
-  State<BattleSabanScreen> createState() => _BattleSabanScreenState();
+  ConsumerState<BattleSabanScreen> createState() => _BattleSabanScreenState();
 }
 
-class _BattleSabanScreenState extends State<BattleSabanScreen> {
+class _BattleSabanScreenState extends ConsumerState<BattleSabanScreen> {
   int _currentPhaseIndex = 0;
   SabanMarkerModel? _selectedMarker;
 
@@ -31,10 +36,7 @@ class _BattleSabanScreenState extends State<BattleSabanScreen> {
           gradient: LinearGradient(
             begin: Alignment.topCenter,
             end: Alignment.bottomCenter,
-            colors: [
-              DauVietColors.parchmentSurface,
-              Color(0xFFFAF2E4),
-            ],
+            colors: [DauVietColors.parchmentSurface, Color(0xFFFAF2E4)],
           ),
         ),
         child: SafeArea(
@@ -46,7 +48,10 @@ class _BattleSabanScreenState extends State<BattleSabanScreen> {
               // 2. Nội dung cuộn chính
               Expanded(
                 child: SingleChildScrollView(
-                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 16,
+                    vertical: 12,
+                  ),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
@@ -70,25 +75,52 @@ class _BattleSabanScreenState extends State<BattleSabanScreen> {
                       Row(
                         children: [
                           Expanded(
+                            flex: 3,
                             child: DongSonButton(
                               label: 'Xem Chi Tiết Chiến Dịch',
                               icon: Icons.auto_stories_rounded,
                               variant: DongSonButtonVariant.primaryCinnabar,
                               height: 48,
                               onPressed: () {
-                                context.go('/campaign/evt_bach_dang_938');
+                                final events =
+                                    ref
+                                        .read(eventsListProvider)
+                                        .value
+                                        ?.milestones ??
+                                    [];
+                                final bd = events
+                                    .cast<TimelineMilestoneModel?>()
+                                    .firstWhere(
+                                      (e) =>
+                                          e != null &&
+                                          (e.id.contains('000000000001') ||
+                                              e.title.toLowerCase().contains(
+                                                'bạch đằng',
+                                              )),
+                                      orElse: () => null,
+                                    );
+                                final targetId =
+                                    bd?.eventId ??
+                                    bd?.id ??
+                                    (ApiConfig.useMock
+                                        ? 'evt_bach_dang_938'
+                                        : '00000000-0000-0000-0000-000000000001');
+                                context.go('/campaign/$targetId');
                               },
                             ),
                           ),
                           const SizedBox(width: 10),
-                          DongSonButton(
-                            label: 'Bàn Học',
-                            icon: Icons.home_outlined,
-                            variant: DongSonButtonVariant.secondaryParchment,
-                            height: 48,
-                            onPressed: () {
-                              context.go('/dashboard');
-                            },
+                          Expanded(
+                            flex: 2,
+                            child: DongSonButton(
+                              label: 'Bàn Học',
+                              icon: Icons.home_outlined,
+                              variant: DongSonButtonVariant.secondaryParchment,
+                              height: 48,
+                              onPressed: () {
+                                context.go('/dashboard');
+                              },
+                            ),
                           ),
                         ],
                       ),
@@ -101,7 +133,7 @@ class _BattleSabanScreenState extends State<BattleSabanScreen> {
           ),
         ),
       ),
-      bottomNavigationBar: _buildBottomNav(context),
+      bottomNavigationBar: const MainBottomNav(),
     );
   }
 
@@ -139,7 +171,10 @@ class _BattleSabanScreenState extends State<BattleSabanScreen> {
                 Row(
                   children: [
                     Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 6,
+                        vertical: 2,
+                      ),
                       decoration: BoxDecoration(
                         color: DauVietColors.cinnabarRed,
                         borderRadius: BorderRadius.circular(4),
@@ -218,7 +253,8 @@ class _BattleSabanScreenState extends State<BattleSabanScreen> {
                 child: Image.asset(
                   'assets/images/dv_MAP_ngoquyen_bachdang-base_v01.jpg',
                   fit: BoxFit.cover,
-                  errorBuilder: (context, error, stackTrace) => const SizedBox.shrink(),
+                  errorBuilder: (context, error, stackTrace) =>
+                      const SizedBox.shrink(),
                 ),
               ),
 
@@ -310,7 +346,9 @@ class _BattleSabanScreenState extends State<BattleSabanScreen> {
                         : Colors.black.withValues(alpha: 0.25),
                     borderRadius: BorderRadius.circular(8),
                     border: Border.all(
-                      color: isStakesExposed ? DauVietColors.imperialGold : Colors.white24,
+                      color: isStakesExposed
+                          ? DauVietColors.imperialGold
+                          : Colors.white24,
                       width: isStakesExposed ? 1.5 : 0.8,
                     ),
                   ),
@@ -320,9 +358,13 @@ class _BattleSabanScreenState extends State<BattleSabanScreen> {
                       children: List.generate(
                         7,
                         (i) => Icon(
-                          isStakesExposed ? Icons.change_history_rounded : Icons.water_drop_outlined,
+                          isStakesExposed
+                              ? Icons.change_history_rounded
+                              : Icons.water_drop_outlined,
                           size: isStakesExposed ? 18 : 12,
-                          color: isStakesExposed ? DauVietColors.imperialGold : Colors.white38,
+                          color: isStakesExposed
+                              ? DauVietColors.imperialGold
+                              : Colors.white38,
                         ),
                       ),
                     ),
@@ -335,14 +377,21 @@ class _BattleSabanScreenState extends State<BattleSabanScreen> {
                 top: 8,
                 left: 60,
                 child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 8,
+                    vertical: 3,
+                  ),
                   decoration: BoxDecoration(
                     color: Colors.black45,
                     borderRadius: BorderRadius.circular(4),
                   ),
                   child: const Text(
                     '▲ Thượng lưu sông (Bản doanh Ngô Quyền)',
-                    style: TextStyle(color: Colors.white, fontSize: 9, fontWeight: FontWeight.w600),
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 9,
+                      fontWeight: FontWeight.w600,
+                    ),
                   ),
                 ),
               ),
@@ -351,14 +400,21 @@ class _BattleSabanScreenState extends State<BattleSabanScreen> {
                 bottom: 8,
                 left: 60,
                 child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 8,
+                    vertical: 3,
+                  ),
                   decoration: BoxDecoration(
                     color: Colors.black45,
                     borderRadius: BorderRadius.circular(4),
                   ),
                   child: const Text(
                     '▼ Cửa biển Nam Triệu (Đường quân giặc tiến)',
-                    style: TextStyle(color: Colors.white, fontSize: 9, fontWeight: FontWeight.w600),
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 9,
+                      fontWeight: FontWeight.w600,
+                    ),
                   ),
                 ),
               ),
@@ -383,7 +439,9 @@ class _BattleSabanScreenState extends State<BattleSabanScreen> {
                         color: _getMarkerColor(marker.markerType),
                         shape: BoxShape.circle,
                         border: Border.all(
-                          color: isSelected ? Colors.white : DauVietColors.imperialGold,
+                          color: isSelected
+                              ? Colors.white
+                              : DauVietColors.imperialGold,
                           width: isSelected ? 2.5 : 1.5,
                         ),
                         boxShadow: DauVietColors.heritageShadow,
@@ -435,7 +493,11 @@ class _BattleSabanScreenState extends State<BattleSabanScreen> {
         Row(
           children: List.generate(MockSabanData.phases.length, (index) {
             final isSelected = _currentPhaseIndex == index;
-            final labels = ['1. Giờ Tỵ\n(Triều dâng)', '2. Giờ Ngọ\n(Đỉnh triều)', '3. Giờ Mùi\n(Triều rút cạn)'];
+            final labels = [
+              '1. Giờ Tỵ\n(Triều dâng)',
+              '2. Giờ Ngọ\n(Đỉnh triều)',
+              '3. Giờ Mùi\n(Triều rút cạn)',
+            ];
 
             return Expanded(
               child: Padding(
@@ -450,22 +512,35 @@ class _BattleSabanScreenState extends State<BattleSabanScreen> {
                     });
                   },
                   child: Container(
-                    padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 4),
+                    padding: const EdgeInsets.symmetric(
+                      vertical: 10,
+                      horizontal: 4,
+                    ),
                     decoration: BoxDecoration(
-                      color: isSelected ? DauVietColors.cinnabarRed : DauVietColors.parchmentContainer,
+                      color: isSelected
+                          ? DauVietColors.cinnabarRed
+                          : DauVietColors.parchmentContainer,
                       borderRadius: BorderRadius.circular(10),
                       border: Border.all(
-                        color: isSelected ? DauVietColors.imperialGold : DauVietColors.outlineVariant,
+                        color: isSelected
+                            ? DauVietColors.imperialGold
+                            : DauVietColors.outlineVariant,
                         width: isSelected ? 2 : 1,
                       ),
-                      boxShadow: isSelected ? DauVietColors.heritageShadow : null,
+                      boxShadow: isSelected
+                          ? DauVietColors.heritageShadow
+                          : null,
                     ),
                     child: Text(
                       labels[index],
                       textAlign: TextAlign.center,
                       style: DauVietTypography.labelSmall.copyWith(
-                        color: isSelected ? Colors.white : DauVietColors.inkText,
-                        fontWeight: isSelected ? FontWeight.w800 : FontWeight.w600,
+                        color: isSelected
+                            ? Colors.white
+                            : DauVietColors.inkText,
+                        fontWeight: isSelected
+                            ? FontWeight.w800
+                            : FontWeight.w600,
                         fontSize: 11,
                         height: 1.25,
                       ),
@@ -564,10 +639,26 @@ class _BattleSabanScreenState extends State<BattleSabanScreen> {
             spacing: 14,
             runSpacing: 8,
             children: [
-              _buildLegendItem(Icons.change_history_rounded, const Color(0xFF8B5A2B), 'Bãi cọc ngầm'),
-              _buildLegendItem(Icons.sailing_rounded, DauVietColors.cinnabarRed, 'Quân ta (Tiền Ngô)'),
-              _buildLegendItem(Icons.dangerous_rounded, const Color(0xFF2C3E50), 'Quân Nam Hán'),
-              _buildLegendItem(Icons.shield_outlined, DauVietColors.natureGreen, 'Phục binh bờ sông'),
+              _buildLegendItem(
+                Icons.change_history_rounded,
+                const Color(0xFF8B5A2B),
+                'Bãi cọc ngầm',
+              ),
+              _buildLegendItem(
+                Icons.sailing_rounded,
+                DauVietColors.cinnabarRed,
+                'Quân ta (Tiền Ngô)',
+              ),
+              _buildLegendItem(
+                Icons.dangerous_rounded,
+                const Color(0xFF2C3E50),
+                'Quân Nam Hán',
+              ),
+              _buildLegendItem(
+                Icons.shield_outlined,
+                DauVietColors.natureGreen,
+                'Phục binh bờ sông',
+              ),
             ],
           ),
         ],
@@ -582,7 +673,10 @@ class _BattleSabanScreenState extends State<BattleSabanScreen> {
         const SizedBox(width: 4),
         Text(
           text,
-          style: DauVietTypography.labelSmall.copyWith(fontSize: 10, color: DauVietColors.inkText),
+          style: DauVietTypography.labelSmall.copyWith(
+            fontSize: 10,
+            color: DauVietColors.inkText,
+          ),
         ),
       ],
     );
@@ -604,7 +698,11 @@ class _BattleSabanScreenState extends State<BattleSabanScreen> {
             children: [
               Row(
                 children: [
-                  Icon(_getMarkerIcon(marker.markerType), color: _getMarkerColor(marker.markerType), size: 24),
+                  Icon(
+                    _getMarkerIcon(marker.markerType),
+                    color: _getMarkerColor(marker.markerType),
+                    size: 24,
+                  ),
                   const SizedBox(width: 10),
                   Expanded(
                     child: Text(
@@ -662,69 +760,5 @@ class _BattleSabanScreenState extends State<BattleSabanScreen> {
       default:
         return Icons.sailing_rounded;
     }
-  }
-
-  // Thanh điều hướng Bottom Bar
-  Widget _buildBottomNav(BuildContext context) {
-    return Container(
-      decoration: BoxDecoration(
-        color: DauVietColors.parchmentSurface,
-        border: Border(
-          top: BorderSide(
-            color: DauVietColors.outlineVariant.withValues(alpha: 0.7),
-            width: 1,
-          ),
-        ),
-        boxShadow: DauVietColors.heritageShadow,
-      ),
-      child: BottomNavigationBar(
-        currentIndex: 2, // Tab Sa Bàn đang chọn
-        backgroundColor: Colors.transparent,
-        elevation: 0,
-        type: BottomNavigationBarType.fixed,
-        selectedItemColor: DauVietColors.cinnabarRed,
-        unselectedItemColor: DauVietColors.inkMuted,
-        selectedLabelStyle: DauVietTypography.labelSmall.copyWith(fontWeight: FontWeight.w800),
-        unselectedLabelStyle: DauVietTypography.labelSmall,
-        onTap: (index) {
-          if (index == 0) {
-            context.go('/dashboard');
-          } else if (index == 1) {
-            context.go('/timeline');
-          } else if (index == 2) {
-            // Đang ở Sa Bàn
-          } else {
-            context.go('/dashboard');
-          }
-        },
-        items: const [
-          BottomNavigationBarItem(
-            icon: Icon(Icons.school_outlined),
-            activeIcon: Icon(Icons.school_rounded),
-            label: 'Bàn Học',
-          ),
-          BottomNavigationBarItem(
-            icon: Icon(Icons.auto_stories_outlined),
-            activeIcon: Icon(Icons.auto_stories_rounded),
-            label: 'Lược Sử',
-          ),
-          BottomNavigationBarItem(
-            icon: Icon(Icons.military_tech_outlined),
-            activeIcon: Icon(Icons.military_tech_rounded),
-            label: 'Sa Bàn',
-          ),
-          BottomNavigationBarItem(
-            icon: Icon(Icons.landscape_outlined),
-            activeIcon: Icon(Icons.landscape_rounded),
-            label: 'Di Sản',
-          ),
-          BottomNavigationBarItem(
-            icon: Icon(Icons.person_outline_rounded),
-            activeIcon: Icon(Icons.person_rounded),
-            label: 'Sĩ Tử',
-          ),
-        ],
-      ),
-    );
   }
 }

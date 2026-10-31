@@ -1,0 +1,360 @@
+# DẤU VIỆT — Project Changelog
+
+> Detailed record of significant changes, features và fixes. Newest first.
+
+## 2026-10-29 — Issue #40: Đại tu & Nâng cấp toàn diện Giao diện (Design System v3)
+
+**Scope:** Đồng bộ `dau-viet-mobile` + `dau-viet-admin` theo Landing Page (https://dau-viet-landing.vercel.app/) — palette giấy dó / mực nho / đỏ chu sa / vàng ngự xưởng / jade; Lesson Player → "Sổ tay Thám tử Lịch sử & Sa bàn Chiến thuật". Plan: `plans/261029-issue-40-ui-overhaul/plan.md`. Backend/Flyway/API contract/providers/renderer constructor signatures: **không đổi**.
+
+**Design tokens v3 (mobile `lib/core/theme/`)**
+- `dau_viet_colors.dart` viết lại: `paperBackground #F8F0E0`, `paperCard #FBF8F1`, `paperCardHi #F3E5CE`, `paperCardLo #EFE3CC`, `inkText #30251F`, `inkHeading #3C3026`, `inkSecondary #49382F`, `cinnabarRed #B93430` / `cinnabarRedDark #85211F`, `imperialGold #E0AE45` / `imperialGoldDark #A97932`, `jade #247D78` / `jadeDark #1A5F5B`, `chapterGreen #283F36`, `pixelShadow 4px/2px/6px #402C29`.
+- Legacy aliases `parchmentSurface/Container/High/Dim` trỏ về paper tokens (file chưa polish compile tiếp).
+- `dau_viet_typography.dart` + `chapterNumber`/`chapterNumberSmall` (`GoogleFonts.pressStart2p`), `sectionEyebrow`, `clueTag`.
+- `dau_viet_theme.dart`: `scaffoldBackgroundColor=paperBackground`, `tertiary=jade`.
+- Admin `globals.css` + `tailwind.config.ts`: brand `#B93430`, surface `#F8F0E0`, jade, chapter-green, ink-secondary, gold-dark, pixel shadow vars.
+
+**Atoms mới**
+- Mobile (`lib/core/widgets/`): `section_eyebrow`, `chapter_number_badge`, `paper_grain_overlay`, `tactile_card`, `stamp_seal_badge`, `clue_tag`, `mascot_slot`, `section_divider`, `hero_paper_banner`, `empty_state_card`, `step_progress_bar`, `rare_frame_badge` (12 files).
+- Admin (`src/components/atoms/`): `EmptyStateCard`, `PaperCard`, `SectionDivider`, `SectionEyebrow`, `ClueTag`, `StampSeal`, `ChapterBadge`, `RareFrame` + `index.ts` barrel + `atoms.test.tsx`.
+
+**Lesson Player → "Sổ tay Thám tử Lịch sử"**
+- Top bar rebuild: border-bottom 3px `inkHeading`, `StepProgressBar` 6 chặng (Bối cảnh→Dấu vết→Giả thuyết→Kiểm chứng→Dựng lại→Kết luận) + fraction chip `x/y`, compact auto `<200px/360px`.
+- Renderer redesign: `READ` (cổ thư + drop-cap + grain), `VIEW_IMAGE` (sa bàn + pinch-zoom dialog), `EVIDENCE_SELECT` (clue cards + flip stamps), `HYPOTHESIS_CHOICE` (reasoning board), `VERIFICATION` (3-level verdict chips), `DRAG_ORDER` (timeline + `ChapterNumberBadge`), `CER`/`CER_CHOICE` (C-E-R slots + `_CERConnectorPainter`), `MATCHING`, `REASONING_CONNECT` (`_RelationEdgePainter`), `REFLECTION_PROMPT`, `UNSUPPORTED` (`EmptyStateCard`).
+
+**Screens polish (mobile)**
+- `learner_dashboard_screen` (2× `HeroPaperBanner`, 4× `SectionDivider`, `MascotSlot`, streak strip `StampSealBadge`/`ChapterNumberBadge`), `historical_map_screen`, `path_event_node` (Stateful + `AnimatedScale`), `event_action_sheet`, `campaign_detail_screen`, `collection_screen` (`ClueTag` filters, `RareFrameBadge`, `EmptyStateCard`), `learning_streak_screen`, `profile_screen`, `island_screen`, `island_shop_screen`, `inventory_screen`, `energy_management_screen`, `heritage_island_screen`.
+
+**Admin**
+- `layout.tsx` load `Press_Start_2P`; shell/header/empty-state/status-chip updated; 51 page/component files polished.
+
+**Overflow / regression fixes**
+- `SectionDivider`: `Flexible(fit: FlexFit.loose)` on eyebrow + `Expanded` title.
+- `SectionEyebrow`/`ClueTag`/`_CerRoleHeader`/`_SlotHeader`: `Flexible` + `Text.ellipsis` (fix `RenderFlex` overflow ở 236-376px).
+- `StepProgressBar`: `LayoutBuilder` switch `<200px` (dot 24, no label) / `<360px` (dot 32, no label) / `>=360px` (full label) — tránh overflow trên mọi width.
+- `learner_dashboard_screen` hero `HeroPaperBanner` height `198→202` (0.8px overflow do font metrics).
+- Xóa `_buildCelebrationScreen` dead code + unused imports `section_eyebrow`/`dau_viet_colors`.
+
+**Tests**
+- `test/theme/design_tokens_test.dart` mới — 9 tests validate v3 palette/typography/theme.
+- `learning_flow_issue_29_test.dart` — `ShimmerProgressBar` → `StepProgressBar`, TC-ACT-17 `ensureVisible` + `warnIfMissed: false`.
+- `collection_screen_test.dart` — empty-state text `Chưa có dấu vết`/`bài học`.
+- `visual_storytelling_test.dart` — `MultipleChoiceQuizScreen` bọc `ProviderScope` + override `energyRepositoryProvider`/`rewardSummaryProvider` (EnergyPill giờ là `ConsumerWidget`).
+
+**Verification**
+- `cd dau-viet-mobile && flutter test` → **514/514 pass**.
+- `cd dau-viet-mobile && flutter analyze` → **0 new issues** (9 pre-existing island/* warnings only).
+- `cd dau-viet-admin && npx tsc --noEmit` → clean; `npx vitest run` → **49/49 files, 294/294 tests**.
+
+**Docs updated:** `docs/project-changelog.md`, `docs/PROJECT_OVERVIEW.md`, `tasks/TASK-0031/{task.json,brief.md,handoff.md}`, `plans/261029-issue-40-ui-overhaul/plan.md`.
+
+
+## 2026-10-29 — Issue #36: Học trực tiếp trên Bản đồ Dấu Ấn & Mở khóa Di tích sau khi học
+
+**Scope:** Hợp nhất luồng học chính vào Bản đồ Dấu Ấn (`/map`) — trục đường đi lấy từ `GET /api/v1/me/learning-path` thay vì `map_locations`; di tích trở thành lớp phụ mở khóa sau khi học (ghim vệ tinh). Plan: `plans/261029-issue-36-map-learning/plan.md`. Backend/Flyway: không đổi (contract hiện đủ).
+
+**Mobile (`dau-viet-mobile`)**
+- `features/map/presentation/path_event_node.dart` (mới): `PathEventNode` — nút sự kiện trên canvas; `LearnerPathStatus` → màu/icon (`LOCKED`/`AVAILABLE`/`IN_PROGRESS`/`COMPLETED`/`MASTERED`/`NOT_READY`/`EXPLORATION_ONLY`); chip `x/y bài` khi sự kiện nhiều bài.
+- `features/map/presentation/event_action_sheet.dart` (mới): `EventActionSheet` — bottom sheet khi chạm node; cover `coverAssetKey`, `yearLabel`, tiến độ bài, CTA "BẮT ĐẦU HỌC"/"TIẾP TỤC HỌC"/"ÔN LẠI" đi thẳng `/learning/lesson/:lessonId`; `LOCKED`/`NOT_READY` hiện điều kiện; chip di tích đã mở của sự kiện → `LocationProfileSheet`.
+- `historical_map_screen.dart` (viết lại): nguồn chính `learningPathProvider` (không còn `mapLocationsProvider` làm trục); "Chặng" = `PERIOD` nhóm theo `ERA`; đổi chặng → `touchPeriod(periodCode)`; deep-link `/map?period=<code>` (và `?eventId=` backward-compat); `_SatellitePins` render ghim di tích `unlocked` cạnh node sự kiện → `LocationProfileSheet`; strip đáy = di tích đã mở của chặng (`mapLocationsByPeriodProvider`); `/map?view=timeline` giữ compat.
+- `map_providers.dart`: thêm `mapLocationsByEventProvider(eventId)` + `mapLocationsByPeriodProvider(periodCode)`.
+- `router.dart`: `/journey` + `/journey/:periodCode` → `redirect` sang `/map`/`/map?period=`; xóa import `PeriodSelectionScreen`/`PeriodJourneyScreen`.
+- `main_bottom_nav.dart`: `/journey` → tab 1; label tab 1 đổi "Khám phá" → "Hành trình".
+- `learner_dashboard_screen.dart`: card "Bài học hôm nay" → `/map?period=<code>` (resume cursor trên Bản đồ).
+- `timeline_screen.dart`: redirect `/journey` → `/map`.
+- `lesson_player_screen.dart`: sau `complete()` invalidate `learningPathProvider` + `mapLocationsProvider`.
+- `unlocked_location_banner.dart`: "Tiếp tục học" → `/map` (trước `/dashboard`/`/journey`).
+- **Xóa:** `period_selection_screen.dart`, `period_journey_screen.dart`; cập nhật `learning_path_presentation.dart` (chỉ export `path_status_badge.dart`).
+
+**Admin (`dau-viet-admin`)**
+- `unlocked-locations-card.tsx`: copy nói rõ gắn di tích là **tùy chọn — phần thưởng khám phá sau khi học**; empty-state "không bắt buộc"; badge hiển thị sự kiện liên kết (`"hiện cạnh sự kiện X trên Bản đồ Dấu Ấn"`).
+- `map-locations-page.tsx` (tab `unlock`): helper text cùng thông điệp; `unlockRuleMode NONE` = "mở tự do — không gắn bài học". Không đổi mutation/API.
+
+**Tests**
+- Mới `test/map/path_map_test.dart` (7 case): render node từ learning path; bài không gắn di tích vẫn hiện (AC-2); tap `AVAILABLE` → sheet → `/learning/lesson/:id` (AC-1); `LOCKED` không CTA; ghim vệ tinh chỉ khi `unlocked`, `HIDDEN_UNTIL_UNLOCKED`+locked ẩn (AC-3); đổi chặng → `touchPeriod`; `?period=` deep-link; error + retry.
+- `test/map/journey_map_ui_test.dart`: giữ `LocationProfileScreen`/`LocationProfileSheet` tests; gỡ test map-axis `map_locations` cũ.
+- `test/learning/unlocked_location_banner_test.dart`: "Tiếp tục học" → `/map`.
+- `test/timeline_events_test.dart`, `test/widget_test.dart`: cập nhật `/journey` → `/map`.
+- **Xóa:** `test/map/historical_map_test.dart` (map-axis cũ), `test/learning_path/period_journey_screen_test.dart` + `learning_flow_e2e_integration_test.dart` (pin vào 2 màn đã gỡ).
+
+**Verification**
+- `flutter analyze`: 0 errors.
+- `flutter test test/map/ test/learning/unlocked_location_banner_test.dart test/timeline_events_test.dart test/widget_test.dart test/dashboard/`: all passed (map 10/10, banner, timeline, widget E2E, dashboard).
+- Admin `npx vitest run src/features/events/map-locations-section.test.tsx src/features/lessons`: 83/83 pass; `tsc --noEmit` chỉ còn lỗi pre-existing (`qk` import thiếu ở `map-locations-page.tsx`, `map-location.ts` union types) không do thay đổi này.
+
+**Docs updated:** `docs/LEARNING_PATH_2_0.md` (mục 8.5), `docs/PROJECT_OVERVIEW.md` (bảng đã code), `docs/project-changelog.md`.
+## 2026-10-29 — TASK-0021 / Issue #34: OTP đăng ký, quên mật khẩu và đăng nhập Google
+
+**Scope:** Nâng cấp xác thực theo Issue #34 — đăng ký xác thực OTP qua email, quên/đặt lại mật khẩu bằng OTP với thu hồi phiên, đăng nhập Google (idToken) có account linking. Plan: `plans/261029-issue-34-auth-otp-google/plan.md`.
+
+**Database**
+- `V53__auth_otp_and_google_oauth.sql` — `users.password_hash` nullable (tài khoản Google-only); bảng `auth_otp_challenges` (mã OTP 6 số băm SHA-256 có salt, purpose `REGISTER_VERIFY`/`PASSWORD_RESET`, partial unique `ux_otp_active` đảm bảo một challenge active/(email,purpose)); bảng `user_oauth_accounts` (`UNIQUE (provider, provider_subject)`).
+
+**Backend**
+- `POST /api/v1/auth/register` đổi contract: tạo REGISTER_VERIFY challenge → `202 OtpChallengeResponse` (không tạo user). `POST /auth/register/verify` tạo user `email_verified_at=now()` + trả `TokenResponse`. `POST /auth/otp/resend` (cooldown 60s → `429 OTP_RESEND_COOLDOWN`). `POST /auth/password/forgot` luôn `200` (anti-enumeration); `POST /auth/password/reset` verify OTP + BCrypt mật khẩu mới + revoke toàn bộ `auth_refresh_tokens` của user. `POST /auth/google` verify idToken qua `GoogleIdTokenVerifier` (sig/iss/aud/exp/email_verified), link-or-create LEARNER, từ chối link vào email chưa verified (`403 GOOGLE_EMAIL_UNVERIFIED`).
+- `OtpService` (issue/verify/resend, max 5 attempts, hết hạn 300s), `OtpSender` với `SmtpOtpSender` (`MAIL_ENABLED=true`) và `LoggingOtpSender` fallback chỉ log mã khi profile `local`. Error codes mới: `OTP_INVALID`, `OTP_EXPIRED`, `OTP_MAX_ATTEMPTS_EXCEEDED`, `OTP_RESEND_COOLDOWN`, `OTP_NO_CHALLENGE`, `GOOGLE_TOKEN_INVALID`, `GOOGLE_EMAIL_UNVERIFIED`.
+
+**Mobile**
+- `RegisterScreen` → luồng 2 bước qua `OtpVerificationScreen` mới (ô nhập 6 số, countdown resend 60s); `ForgotPasswordScreen` + `ResetPasswordScreen` cho luồng khôi phục; nút "Quên mật khẩu?" và "Tiếp tục với Google" trên `AuthScreen` (`google_sign_in` + gateway provider mockable). Routes mới: `/auth/forgot`, `/auth/otp`, `/auth/reset-password`.
+
+**Tests/Docs** — `OtpServiceTest` (11), `AuthServiceTest` viết lại (15), `GoogleAuthServiceTest` (7), `AuthControllerIT` viết lại cho contract OTP (Docker-blocked locally), mobile auth tests 29/29 pass. Docs: `API_SPEC.md`, `DATABASE_DESIGN.md`, `backend-runbook.md` (`MAIL_*`/`GOOGLE_CLIENT_IDS` envs).
+## 2026-10-29 — Issue #38: Khiên Chuỗi & Thưởng Chuỗi (Streak Shields & Rewards)
+
+**Scope:** Mở rộng Learning Streak — khiên bảo vệ tự cứu chuỗi khi bỏ đúng 1 ngày, phạt reset khi đứt, thưởng daily + milestone đổ vào `reward_transactions`. Backend là source of truth (server ngày `Asia/Ho_Chi_Minh`, idempotent 3 lớp); Điểm Sử Ký của thưởng đổ qua lazy-bridge wallet (không `WalletService.credit` mới). Branch `feat/issue-38-streak-shields-and-rewards`.
+
+**Database**
+- `V51__streak_shields_and_rewards.sql` — `user_learning_streaks.shield_count` (0–3, `CHECK`); `user_learning_streak_days` thêm `day_type ∈ (STUDY, SHIELD_PROTECTED)` (default STUDY), `reward_exp`, `reward_points`, `milestone_day` + partial index `day_type='SHIELD_PROTECTED'` cho `protectedDates` API.
+
+**Backend**
+- `UserLearningStreak`: `MAX_SHIELDS=3`, `shieldCount`, `addShield()`, `advanceTo` trả `AdvanceResult{dayRecorded, shieldConsumed, protectedDate}` — 4 nhánh (`== last` no-op; `== last+1` → +1; `== last+2 && shield>0` → trừ 1 khiên + ghi protectedDate; else reset 1).
+- `UserLearningStreakDay`: `dayType`, `rewardExp`, `rewardPoints`, `milestoneDay` + factory 10 tham số; repo `findProtectedDatesBetween`, `updateReward`.
+- `StreakRewardPolicy` (`@Component`): daily +5 EXP/+5 pts khi `current≥2`; milestones {3→15/10, 7→30/25, 14→60/50, 30→120/100}; `causeKey = STREAK:{user}:{date}:{DAILY|MILESTONE_N}:{EXP|POINTS}` — `insertIgnore` idempotent. Ngày SHIELD_PROTECTED không daily reward nhưng vẫn đếm `current` cho milestone.
+- `LearningStreakService.recordCompletion`: sau advance ghi `SHIELD_PROTECTED` row (FK reuse lesson/attempt — `insertIgnore` → STUDY thắng race), grant daily+milestone qua `RewardTransactionRepository.insertIgnore`, `updateReward` trên row STUDY.
+- `buyShield` trong `IdempotencyService.execute` op `STREAK_SHIELD_PURCHASE`: lock `user_learning_streaks` → cap-check 422 `SHIELD_AT_MAX_CAPACITY` → `wallet.debit(20, REASON_STREAK_SHIELD_PURCHASE, STREAK_SHIELD:{key})` → +1 khiên. Lock-order khác `doComplete` → deadlock-safe. `POST /api/v1/me/streak/shields` 201, Idempotency-Key bắt buộc.
+- `CompleteAttemptResponse.streak` additive: `shieldConsumed`, `shieldCount`, `bonusExp`, `bonusPoints`, `milestoneDay`. `GET /me/streak` + `shieldCount`/`maxShields`/`shieldCostPoints`/`streakAtRisk`/`milestones[]`; `GET /me/streak/calendar` + `protectedDates[]`. `ErrorCode.SHIELD_AT_MAX_CAPACITY` → 422.
+
+**Mobile**
+- `streak_dto`: `StreakMilestoneDto`, `StreakShieldPurchaseDto`, shield fields trên `LearningStreakDto`/`StreakInfoDto`, `protectedDates` trên `LearningStreakCalendarDto`. `streak_api_client.buyShield` + `StreakController.buyShield` (StateError nếu session chết); `applyStreakInfo` đồng bộ `shieldCount` theo `serverTime` freshness.
+- `LearningStreakScreen`: `_ShieldCard` (3-slot icons, nút "Đổi 20đ" khi `shieldCount<3`, notice `streakAtRisk`), `_MilestoneCard`, calendar 🛡️ markers từ `protectedDays`. Dashboard `_StreakMiniPill` hiển thị 🛡️ count, `_StreakWeekStrip` shield set + icon. `LessonResultScreen` `_StreakShieldAndBonusNote` dưới flame banner.
+
+**Tests & verification**
+- Backend: `LearningStreakServiceTest` **27/27** (11 test mới: shield auto-consume, reset không khiên/đủ ngày, daily+milestone grant, buyShield debit/cap/idempotent); `LearningStreakIT` **19/19** trên Testcontainers PostgreSQL 16 (`buyShieldDebitsPointsAndCapsAtThree`, `buyShieldInsufficientFunds`, `shieldAutoProtectsAfterOneMissedDay`, `missedOneDayNoShieldResets`, `missedTwoDaysWithShieldsStillResets`, `streakDailyAndMilestoneRewards`). Sửa `setCompletedAt` helper đồng bộ `last_qualified_date = MAX(study_date)` trong ledger — mô phỏng đúng "attempt hoàn thành ngày đó" khi dịch lùi nhiều bậc.
+- Mobile: `streak_provider_test` **9/9** (+applyStreakInfo shieldCount sync, +buyShield repo/state, +buyShield error no-op); `flutter analyze` clean; `FakeStreakRepository` tách `buyError` khỏi fetch `error`.
+
+**Docs updated:** `docs/GAMIFICATION_BUSINESS_RULES.md` (STRK-05 viết lại — streak nay ĐÃ ghi `reward_transactions`; +STRK-09..12), `docs/GAMIFICATION_TECHNICAL_CONTRACT.md` §5.1 (advanceTo 4 nhánh, lock-order, cause scheme, SHIELD_PROTECTED), `docs/API_SPEC.md` (route `/me/streak/shields`, response fields, error codes), `docs/project-changelog.md`.
+
+## 2026-10-28 — PATH-2.0 & HERITAGE-MAP-2.0 (Epics A–F, Issues #2–#26): Luồng Học Theo Thời Kỳ & Bản Đồ Di Sản
+
+**Scope:** Nâng cấp toàn diện lộ trình học lịch sử phân cấp (`ERA -> PERIOD -> PHASE -> EVENT -> LESSON`), mở khóa tuần tự theo từng thời kỳ, tách địa điểm di tích thành thực thể độc lập liên kết N–N với sự kiện và bài học (`ANY`/`ALL`), tích hợp Admin CMS, Flutter Mobile, kiểm thử End-to-End và chốt lộ trình gỡ cột deprecated (ADR-009). Plan: `plans/261028-issue-26-e2e-integration-docs/plan.md`.
+
+**Database**
+- `V39__learning_path_hierarchy.sql` — Mở rộng `learning_path_chapters` (`parent_id`, `node_type ∈ ERA|PERIOD|PHASE`) và `historical_events` (`end_year`, `date_precision ∈ EXACT|CIRCA|CENTURY|PERIOD`).
+- `V40__heritage_locations.sql` — Nới `map_locations.event_id` thành nullable, gỡ FK bắt buộc cùng sự kiện, bổ sung metadata di sản (`slug`, `kind`, `coordinate_precision`, `visibility`, `unlock_rule_mode`, `cover_asset_id`, `short_summary`) và 4 bảng mới: `map_location_events`, `map_location_unlock_lessons`, `map_location_media`, `user_location_unlocks`.
+- `V41__user_path_period_state.sql` — Bảng `user_path_period_state` lưu dấu thời kỳ người học tương tác gần nhất (`last_touched_at`).
+- `V42__seed_history_main_v2.sql` — Phát hành `HISTORY_MAIN` v2 (`PUBLISHED`) với 4 đại thời kỳ (`ERA`) và 5 thời kỳ (`PERIOD`), tự động nâng cấp enrollment của người học.
+- `V43__seed_heritage_location_assets_and_media.sql` — Đồng bộ 6 tranh minh họa di sản vào `assets`, backfill 12 địa điểm di tích canonical và tư liệu `map_location_media`.
+- **Quyết định gỡ cột deprecated (`ADR-009` / Issue #26)**: Hai cột `map_locations.event_id` và `map_locations.unlock_lesson_id` được đánh dấu deprecated (nguồn chuẩn là `map_location_events` và `map_location_unlock_lessons`); giữ tương thích ngược trong Phase 1 và chỉ thực thi `DROP COLUMN` ở Milestone M4 Cleanup khi thỏa mãn đủ 4 cổng kiểm toán trong `docs/DATABASE_DESIGN.md`.
+
+**Backend**
+- `com.dauviet.path`: `PathHierarchyValidator` kiểm tra nghiêm ngặt phân cấp `ERA -> PERIOD -> PHASE` (`422 PATH_NODE_INVALID_PARENT`); `LearnerPathProgressionService` mở khóa tuần tự trong phạm vi từng `PERIOD`, cho phép học tự do bài `PUBLISHED` ngoài lộ trình (`#8`), tự động nâng cấp lên phiên bản `PUBLISHED` mới nhất của `HISTORY_MAIN`, trả `periodProgress[]`, `currentByPeriod`, `lastPeriodCode` và cung cấp `POST /api/v1/me/learning-path/periods/{periodCode}/touch`.
+- `com.dauviet.map`: `LocationUnlockEvaluator` (`LessonCompletionHook`) đánh giá luật mở khóa `ANY`/`ALL` trong cùng transaction `LearnerAttemptService.doComplete()` và trả `newlyUnlockedLocations[]`; `MapLocationService` lọc ẩn tư liệu `UNLOCKED_ONLY` khi địa điểm đang khóa; `AdminStandaloneMapLocationController` cung cấp CRUD địa điểm, liên kết sự kiện, bài học mở khóa và media.
+
+**Admin & Mobile**
+- Admin (`#18`–`#20`): Learning Path Builder dạng cây phân cấp, trang quản lý Địa điểm Di sản và Media độc lập (`/map-locations`), và thẻ Địa điểm mở khóa trong Lesson Builder.
+- Mobile (`#21`–`#26`): Tầng dữ liệu `lib/features/learning_path/data/`, màn Chọn thời kỳ (`/journey`) và Hành trình thời kỳ (`/journey/:periodCode`) ẩn tầng 1 mục và hiển thị badge có đủ icon + nhãn, Trang chủ tiếp tục hành trình theo `currentByPeriod[lastPeriodCode]`, danh sách bài học trong Chiến dịch hiển thị trạng thái từ lộ trình, chuyển hướng `/heritage/:locationId`, sửa lỗi tràn khung ngang (`RenderFlex` overflow) trên màn hình hẹp 412px tại `PeriodSelectionScreen`/`PeriodJourneyScreen`, và sửa lỗi điều hướng sự kiện từ Sa Bàn (`BattleSabanScreen`).
+
+**Tests & verification**
+- Backend: `LearningFlowHeritageEndToEndIT` **3/3**, `LearningPathHierarchyAndPeriodIT` **2/2**, `LearningPathApiIT` **6/6**, `HeritageLocationV2IT` **1/1** pass trên PostgreSQL 16 Testcontainers; sửa `LearningPathItFixture` upsert theo `slug` và đồng bộ template/policy với V42.
+- Mobile: `flutter test --no-pub test/learning_path/ test/dashboard/ test/campaign/ test/campaign_detail_test.dart` **35/35 pass** (bao gồm `learning_flow_e2e_integration_test.dart`).
+
+**Docs updated:** `docs/DECISIONS.md`, `docs/DATABASE_DESIGN.md`, `docs/LEARNING_PATH_2_0.md`, `docs/API_SPEC.md`, `docs/PROJECT_OVERVIEW.md`, `docs/development-roadmap.md`, `docs/project-changelog.md`.
+
+## 2026-10-26 — LEARN-STREAK: Chuỗi Ngày Học — Ngọn Lửa Hào Khí
+
+**Scope:** Daily learning streak end-to-end — PostgreSQL → Spring Boot → Flutter. Streak = số ngày VN liên tiếp có ≥1 attempt COMPLETED, timezone `Asia/Ho_Chi_Minh` tính server-side từ `learner_attempts.completed_at`; streak KHÔNG sinh reward transaction (POINT-03); không đụng GAME-07/GAME-08, không sửa migration đã apply. Plan: `plans/261026-1315-learning-streak/`.
+
+**Database**
+- `V31__learning_streak.sql` — `user_learning_streaks` (current_streak, longest_streak, last_qualified_date — aggregate optimistic row) + `user_learning_streak_days` (ledger `UNIQUE(user_id, study_date)`, `first_attempt_id` provenance). Idempotency 3 lớp: ledger insert `ON CONFLICT`, `advanceTo` no-op same-day, retry-safe. Mirror sang `dau-viet-db/db/migration`; backfill `dau-viet-db/scripts/` replay ngày học từ `learner_attempts` theo VN day.
+
+**Backend**
+- `com.dauviet.streak`: entities + repositories; `LearningStreakService` pessimistic lock (thứ tự lock `learner_attempts` → `days` → `streaks` — no deadlock với completion flow), `recordStudyDay` trả flag "ngày mới được ghi", `advanceTo` — ngày liên tiếp `current+1`, bỏ lỡ reset 1, `longestStreak = max(...)` không giảm, `streakAlive` = last là hôm nay HOẶC hôm qua VN; read path `readOnly` không lazy-create.
+- `LearningStreakController`: `GET /api/v1/me/streak` (currentStreak, longestStreak, completedToday, streakAlive, lastQualifiedDate, today, timezone, serverTime), `GET /api/v1/me/streak/calendar?from&to` (cap 92 ngày, 400 range ngược).
+- Hook `LearnerAttemptService.doComplete` sau reward/event milestone cùng tx; `CompleteAttemptResponse.streak` additive — non-null CHỈ khi ledger ghi ngày mới (null trên replay/bài thứ hai cùng ngày → client không re-animate, không cần gọi thêm API).
+
+**Mobile**
+- `lib/features/streak/data/`: `streak_dto` (`LearningStreakDto`, `LearningStreakCalendarDto`, `StreakInfoDto.tryParse` → null khi `!dayRecorded`), `streak_api_client`, repository interface + api impl (ApiException thẳng lên UI, không fallback mock) + mock (5 ngày demo), `streak_providers` — `StreakController` AsyncNotifier mirror energy (sessionKey, `applyStreakInfo` freshness `serverTime`, `_noRetry`), `streakCalendarProvider` family theo (year, month).
+- UI: route `/streak` + `LearningStreakScreen` (flame hero dim khi chưa cháy, today message 4 trạng thái, stat cards, month calendar chấm đỏ ngày học + viền vàng hôm nay); dashboard thay `'⚡12'`/`'❤️3'` bằng `_EnergyMiniPill`/`_StreakMiniPill` đọc provider thật (placeholder `'—'` khi loading/error) → `/energy`, `/streak`; profile `_StreakCard` + menu tile; lesson player header `_StreakBadge` số thật; result screen `_StreakFlameBanner` animate một-lần (flame elastic + count N-1→N, "Kỷ lục mới!") qua `LessonResultDto.newlyRecordedStreak` — client-only, server GET /result không trả → deep-link không replay animation.
+
+**Tests & verification**
+- Backend: `LearningStreakServiceTest` **14/14**, `LearnerAttemptServiceTest` **19/19**; `mvnw verify` — toàn bộ IT fail do Testcontainers cần Docker (Docker off — pre-existing blocker, không liên quan streak).
+- Mobile: `dart format` clean, `flutter analyze` 0 errors, `flutter test` **438 pass**; dashboard test cập nhật assertion (không còn số hard-code); 2 fail `lesson_player_energy_test` xác nhận pre-existing trên HEAD qua stash/pop.
+
+**Docs updated:** `docs/API_SPEC.md`, `docs/DATABASE_DESIGN.md`, `docs/GAMIFICATION_BUSINESS_RULES.md` (STRK-01..08), `docs/GAMIFICATION_TECHNICAL_CONTRACT.md` (context thứ 7 + §5.1), `docs/development-roadmap.md`, `docs/project-changelog.md`.
+
+## 2026-10-25 — GAME-06: Admin Gamification CMS
+
+**Scope:** Admin CMS (Spring Boot + Next.js admin) quản trị gamification — event completion policies, historical dossiers + event links, item rule builder V2 + history, reconcile/backfill panel. Backend authoritative, mọi route `/api/v1/admin/**` gate `CONTENT_ADMIN`; không đụng Flutter, không đụng learning engine internals, không sửa V22–V27. Plan: `plans/261025-0553-game06-admin-gamification-cms/`.
+
+**Database**
+- `V28__historical_dossier_versions.sql` — `historical_dossiers` +`row_version` (optimistic lock admin PUT); bảng `historical_dossier_versions` append-only snapshot mỗi publish (`UNIQUE(dossier_id, dossier_version)`, status CHECK `PUBLISHED|ARCHIVED`, `published_by`), backfill dossier PUBLISHED có sẵn — pin `user_dossier_unlocks.dossier_version` truy vết được nội dung đã duyệt.
+
+**Backend**
+- Module A — `AdminCompletionPolicyController` + `AdminCompletionPolicyService`: `GET/POST/PUT /admin/events/{eventId}/completion-policies[/{policyId}]`, `POST .../validate` (dry-run `{valid,errors,warnings,diff}`), `POST .../publish` atomic (lock event `FOR UPDATE` → revalidate → archive PUBLISHED cũ `saveAndFlush` trước insert mới tránh va `ux_event_policy_published` → publish). `PUT` sửa **in-place trên DRAFT** (policyId ổn định — user override thay copy-on-write; PUBLISHED immutable). `expectedPolicyVersion` lệch → 409 `OPTIMISTIC_LOCK_CONFLICT`; validate fail → 422.
+- Module B — `AdminDossierController` + `AdminDossierService`: dossier CRUD (`GET/POST /admin/dossiers`, `GET/PUT /admin/dossiers/{id}` — `canonicalCode` kebab-case set một lần, `source` structured `DossierSourceInput` **không raw JSON**, `expectedRowVersion` guard), `POST .../publish` (`dossier_version=max+1` + snapshot V28), `POST .../archive` (entitlement đã unlock giữ nguyên), `GET/PUT /admin/events/{eventId}/dossiers` (replace-list nguyên tử — mọi dossier phải PUBLISHED, `displayOrder≥0` không trùng → 422). Sửa nội dung trên PUBLISHED → `pendingChanges` chờ publish version mới.
+- Module C — `AdminItemRuleController`: `POST /admin/items/{itemId}/rule/validate` (đúng pipeline parse+validate+scope-check của `PUT /rule`, không ghi DB → `{valid,errors,warnings,normalizedCondition,scope,acceptsRule}`), `GET .../rule/history` (revision append-only + `grantCount` từ `user_inventory.unlock_rule_id`).
+- `GlobalExceptionHandler` mở rộng bắt `org.springframework.dao.OptimisticLockingFailureException` (superclass — service throw thủ công cho stale guard, trước chỉ bắt `ObjectOptimisticLockingFailureException` → 500 thay vì 409).
+
+**Admin UI**
+- Tab `gamification` trong Event Workspace: `PolicyEditor` (checkbox required/optional lesson, threshold mastered, validate + publish với stale-409 handling), `DossierLinkTable` (reorder + remove + link picker).
+- Trang `/dossiers`: list + filter type/status/q + dossier editor (source form structured, pending-changes banner, publish/archive).
+- `/items/[id]`: Rule Builder V2 (AST builder không raw JSON, scope banner GLOBAL/EVENT_SCOPED/UNRESOLVED, validate trước Save), rule history table, `ReconcilePanel` (confirm dialog → POST reconcile-unlocks/backfill → counter thật).
+
+**Tests & verification**
+- Backend: `AdminCompletionPolicyIT`, `AdminDossierIT`, `AdminItemRuleIT` mới; `AbstractPostgresIT` thêm cleanup `historical_dossier_versions`; `mvnw verify` **PASS 363 IT + 486 unit**, Flyway V28 clean.
+- Admin: `npm run typecheck` PASS; `vitest run` **288/288** (+13 test: policy-editor, dossier-link-table, dossiers-table, reconcile-panel, scope-banner; MSW handlers cho toàn bộ endpoint mới); `npm run build` PASS.
+
+**Docs updated:** `docs/API_SPEC.md`, `docs/DATABASE_DESIGN.md`, `docs/development-roadmap.md`, `docs/project-changelog.md`.
+
+## 2026-10-25 — GAME-05 FINAL FIX: Grant Provenance & Rule Safety
+
+**Scope:** 4 fix trên commit `32f6428` — grant event-milestone giữ provenance attempt, chặn bypass bảo vệ event-specific bằng rule V1 global, tách schema `rule_version` khỏi `revision` publish monotonic, siết kiểm chứng evidence collectible theo EVIDENCE_SELECT. Không refactor rộng, không tính năng mới — chuẩn bị cho GAME-06.
+
+**Database**
+- `V27__item_rule_revision_schema.sql` — `item_unlock_rule` +`revision INTEGER`; backfill `revision = rule_version` (provenance cũ giữ nguyên); `SET NOT NULL` + `DEFAULT 1` (chỉ bảo vệ insert thủ công) + `chk_rule_revision CHECK (revision >= 1)`. Không sửa V24/V25/V26.
+
+**Backend**
+- FINAL FIX-1 (P1): `EventMilestoneRecorder.recordIfEarned` overload 4-tham-số `(userId, eventId, lessonId, attemptId)`; `doComplete` truyền attempt đang hoàn thành → `ItemUnlockService.evaluateAfterEventMilestone` grant với `source_attempt_id`/`source_lesson_id` đúng → `itemsUnlocked` (lọc `source_attempt_id` + `acquisition_source<>'ADMIN_GRANT'`) hiển thị badge `EVENT_COMPLETED` ngay trên result screen. Overload 2-tham-số cho reconcile giữ null — không gán attempt giả; không vòng gọi; grant cùng tx completion; `cause_key` chặn double-grant khi `evaluateAfterLessonCompletion` chạy sau.
+- FINAL FIX-2 (P1): `ItemRuleScopeResolver` (mới) suy `ItemScope ∈ UNRESOLVED|EVENT_SCOPED|GLOBAL` từ toàn bộ lịch sử rule của item — từng có AST chứa leaf event-scoped → `EVENT_SCOPED`; chỉ có flag `needs-mapping` → `UNRESOLVED`; còn lại `GLOBAL`. `AdminItemService.buildRule` từ chối 400 publish rule global lên item `UNRESOLVED`/`EVENT_SCOPED`; `ItemUnlockService.blockedByAudit` chặn grant `UNRESOLVED` kể cả khi active rule mất flag; `RewardService.requirement` → `UNCONFIGURED`. Không hard-code mã item/tên Bạch Đằng; item `GLOBAL` vẫn nhận rule global.
+- FINAL FIX-3 (P2): `rule_version` giờ chỉ là schema payload (1=V1, 2=V2 — CHECK cũ giữ); `revision` mới là thứ tự publish per-item — cả nhánh V1 lẫn V2 của `setRule` đều ghi `findMaxRevision(itemId)+1` (V2 floor 2). Sửa lỗi publish V1 sau nhiều publish V2 ghi `rule_version=1` → revision trùng/giảm. `user_inventory.unlock_rule_version` ghi `revision`; `AdminItemResponse.Rule.ruleVersion` trả `revision`.
+- FINAL FIX-4 (P2): `ItemConditionValidator.isCollectible` siết lại — evidence chỉ "collect được" khi một activity `EVIDENCE_SELECT` trong snapshot PUBLISHED hiện tại tham chiếu nó (`@> jsonb_build_array(to_jsonb(:eid))` trên `visibleEvidenceIds`/`acceptedEvidenceIds`/`requiredEvidenceIds` hoặc `evidenceOptions[{id}]`); chỉ nằm trong `snapshot.evidence[]` metadata là chưa đủ (recorder chỉ ghi từ submission EVIDENCE_SELECT được chấp nhận). Fallback `user_evidence` row — entitlement collect từ version cũ giữ nguyên. Native query fix: bỏ `::text` cast làm param fail.
+
+**Tests & verification**
+- `ItemRuleEngineIT` 23/23 (+6: eventMilestoneGrant giữ provenance hiển thị trên result, eventScopedItem từ chối rule global tới khi có rule event, globalItem vẫn cho COLLECTION_COUNT, revision monotonic V1→V2→V1 (schema 1,2,2,1 / revision 1,2,3,4), SPECIFIC_EVIDENCE_SET từ chối evidence chỉ có trong READ, chấp nhận evidence collect từ version cũ). `ItemUnlockIT`/`EventCompletionIT`/`RewardGrantIT`/`AttemptCompletionIT` + parser/evaluator unit tests.
+- `mvnw verify` **PASS 328/328** (trước 322). Mobile: `dart format` clean, `flutter analyze` 0 issues, `flutter test` **PASS 430/430** — không đổi code mobile.
+
+**Docs updated:** `docs/API_SPEC.md`, `docs/DATABASE_DESIGN.md`, `docs/project-changelog.md`.
+
+## 2026-10-25 — GAME-05 FIX: Rule Engine Integrity & CI
+
+**Scope:** 8 fix trên commit `da4e9cf` — đồng bộ trạng thái UNCONFIGURED, grammar chặt cho condition JSON, trigger item evaluation sau event reconcile, `rule_version` thành revision per-item, chặn ruleType lệch, kiểm chứng evidence collectible, reconcile theo batch, sửa countdown test mobile CI.
+
+**Database**
+- `V26__item_rule_revision_check.sql` — `chk_rule_version` nới `rule_version >= 1` (thay `IN (1,2)`); `chk_unlock_rule_shape` nhánh v2 đòi `rule_version >= 2` (revision per-item, mỗi publish = max+1); `chk_rule_v2_condition` giữ nguyên semantics. Không đụng V24/V25 đã áp dụng, không retro-update.
+
+**Backend**
+- FIX-1 (P1): `ItemUnlockRule.isNeedsMapping(metadata)` static dùng chung — grant path (`ItemUnlockService.blockedByAudit`) và catalog read path (`RewardService.requirement` → `UNCONFIGURED`, `satisfied=false`, children rỗng, description "Điều kiện mở khóa đang được cập nhật"). Không fake satisfied của rule legacy, không progress bar giả, owned giữ Owned, status biến mất khi publish rule v2 hợp lệ.
+- FIX-2 (P1): `ItemConditionParser` rewrite — `ALLOWED_LEAF_FIELDS` per `LeafType`; leaf từ chối field ngoài tập cho phép (bug `eventId` thừa trên `LESSON_COUNT` bị bỏ qua âm thầm); operator node phải đúng 1 key; không all+any đồng thời, không all/any+type; ALL/ANY non-empty depth ≤2. Lỗi → HTTP 400.
+- FIX-3 (P1): `EventMilestoneRecorder` inject `@Lazy ItemUnlockService` — khi reconcile-on-read ghi MỚI milestone `EVENT_COMPLETED`/`EVENT_MASTERED` thì gọi `evaluateAfterEventMilestone` cùng tx. Chỉ trigger trên milestone mới, không vòng lặp, không re-eval thừa.
+- FIX-4 (P2): `rule_version` = revision per-item — `AdminItemService.setRule` tính `findMaxRuleVersion(itemId)+1` (min 2). Provenance `user_inventory.unlock_rule_version` trace đúng lần publish; rule cũ → inactive.
+- FIX-5 (P2): `buildRule` validate `ruleType` trước DB write — condition non-null thì chỉ chấp nhận null/blank/`RULE_V2`, ngược lại 400 "contradicts a v2 condition"; normalize về `RULE_V2`.
+- FIX-6 (P2): `ItemConditionValidator.isCollectible` — `SPECIFIC_EVIDENCE_SET` đòi evidence xuất hiện trong `snapshot.evidence[]` của một lesson PUBLISHED (current version) hoặc đã có `user_evidence` row; không đoán theo title/tag.
+- FIX-7 (P2): `ItemUnlockService.reconcileBatched(batchSize)` — keyset pagination `user_id > cursor` (CAST uuid), mỗi trang `REQUIRES_NEW` qua self-injection `ObjectProvider`; trả `{itemsGranted, usersScanned, batches}`; endpoint `?batchSize=` (default 200, 0 = legacy single-shot). Cùng evaluator + grant path realtime.
+- FIX-8 (P1): `EnergyStateDto.debugOverrideEnergyNow(DateTime)` test hook + `_deviceNowUtc()` helper — countdown test định `fakeNowUtc` cố định, `nextRecoveryAt` dẫn xuất từ fake now → expect đúng `Duration(seconds: 30)`; không đổi gameplay energy.
+
+**Mobile** (`dau-viet-mobile`)
+- `reward_dtos.dart`: `ItemRequirementDto.isUnconfigured` (`status == 'UNCONFIGURED'`) + doc cập nhật enum status.
+- `inventory_screen.dart`: `_RequirementTree` early-return node UNCONFIGURED → row icon tune + text nghiêng muted "Điều kiện mở khóa đang được cập nhật" (hoặc description server).
+- `energy_dto.dart` + `energy_dto_test.dart`: hook override now + test countdown dùng fake now cố định.
+
+**Tests & verification**
+- Backend: `ItemRuleEngineIT` 17/17 (+6 test mới: needs-mapping catalog, event reconcile trigger, rule revision provenance, contradictory ruleType 400, evidence-not-collectible 400, extraneous/ambiguous fields 400), `ItemConditionParserTest` 14/14 (+6 strict-shape), `ItemRuleEvaluatorTest` 13/13. `mvnw verify` **PASS 322/322** (trước đó 316).
+- Mobile: `dart format --set-exit-if-changed` clean, `flutter analyze` 0 issues, `flutter test` **PASS 430/430**.
+
+**Docs updated:** `docs/API_SPEC.md`, `docs/DATABASE_DESIGN.md`, `docs/project-changelog.md`.
+
+## 2026-10-25 — GAME-05: Item Unlock Rule Engine V2 & Achievement Rules
+
+**Scope:** vật phẩm/huy hiệu chỉ mở khóa khi learner thoả điều kiện cấu hình — AST `condition_json` thay cho 3 rule phẳng V1, event-scoped conditions đọc ledger GAME-04, rule append-only có provenance, API requirement tree cho Flutter.
+
+**Database**
+- `V24__item_rule_engine_v2.sql` — `item_unlock_rule` +`rule_version`/`condition_json` JSONB/`rule_metadata` JSONB; `user_inventory` +provenance (`unlock_rule_id`, `unlock_rule_version`, `source_event_id`, `cause_key` + partial unique); `acquisition_source` +`RULE_UNLOCK`/`RECONCILE_GRANT` (giữ `ADMIN_GRANT`); normalize rule v1 sang `condition_json` tương đương (giữ `rule_version=1`); seed audit 7 item event-themed → `needs-mapping`, `HUY_HIEU_DIEN_BIEN_PHU` → `valid-global`.
+- `V25__item_rule_v2_check_extension.sql` — mở rộng `chk_unlock_rule_type` (+`RULE_V2`) và `chk_unlock_rule_shape` (v2 đòi `condition_json` NOT NULL, cột phẳng NULL) — fix gap V24 thiếu CHECK cho `rule_type='RULE_V2'`.
+
+**Backend** (`com.dauviet.reward`)
+- Mới: `ItemCondition` (sealed `Leaf|All|Any`, `LeafType` 11 loại), `ItemConditionParser` (depth ≤2, ≤20 children/operator, grammar nghiêm → `ItemRuleException`), `ItemConditionValidator` (tham chiếu event/lesson PUBLISHED, `EVENT_*` đòi policy configured, `SPECIFIC_EVIDENCE_SET` evidence APPROVED thuộc `eventId` + không trùng, `LEVEL_AT_LEAST` → 400 "not evaluable yet"), `ItemRuleEvaluator` (`Evaluation(satisfied, root ConditionStatus)` — per-branch `status ∈ SATISFIED|PENDING|UNSUPPORTED`, `current`/`required`, `description` tiếng Việt), `ItemRuleEvaluationContext` (lazy per-request cache, không N+1).
+- `ItemUnlockService` rewrite: `evaluate(userId, lessonId?, attemptId?, eventId?)` — per-user advisory lock `pg_advisory_xact_lock(hashtextextended('item-unlock|'||userId))`; `conditionOf()` + `legacyConditionJson()` fallback cho rule v1 (row JDBC thiếu `condition_json`); `blockedByAudit()` đọc `rule_metadata.audit='needs-mapping'` chặn grant mới; grant qua `insertIgnoreV2` với `acquisition_source='RULE_UNLOCK'`, `cause_key = item-rule|{ruleId}|{userId}`.
+- `LearnerAttemptService.doComplete` ordering fix: `eventMilestones.recordIfEarned` **trước** `itemUnlocks.evaluateAfterLessonCompletion` (leaf `EVENT_*` thấy milestone vừa ghi trong cùng tx).
+- `RewardService` — catalog() dùng chung một `ItemRuleEvaluationContext`; `requirement()` parse `condition_json` (fallback legacy) → evaluator → `toRequirement()` map cây `ConditionStatus` sang `Requirement` tree; `inventoryList`/`itemsUnlockedByAttempt` trả provenance.
+- `AdminItemService.setRule` — `req.condition` non-null → parse+validate → `ItemUnlockRule.v2` (`ruleVersion=2`, `ruleType='RULE_V2'` default); không `condition` → validateV1 + legacy factory. `AdminItemResponse.Rule` +`ruleVersion`/`conditionJson`/`ruleMetadata`.
+- `GlobalExceptionHandler` — `ItemRuleException` → `400 VALIDATION_ERROR` "Invalid unlock rule" (không 500).
+- `reconcileUnlocks` — cùng evaluator realtime trên tập user ứng viên (UNION `user_evidence`/`learner_attempts COMPLETED`/`user_event_progress`, không quét toàn bảng); `acquisition_source='ADMIN_GRANT'`; rule `LESSON_COMPLETED` backfill `source_lesson_id` + earliest COMPLETED attempt.
+
+**Mobile** (`dau-viet-mobile`)
+- `reward_dtos.dart`: `ItemRequirementDto` → tree model (`operator`, `eventId`, `lessonId`, `lessonTitle`, `evidenceIds`, `threshold`, `current`, `required`, `satisfied`, `status`, `description`, `conditions`); `isOperator`/`isUnsupported`/`operatorHeading()`/`describe()`/`progressFraction`; `InventoryItemDto` +provenance fields.
+- `inventory_screen.dart`: locked branch render `_RequirementTree` — operator heading (`Hoàn thành tất cả/một trong các điều kiện sau`) + indented leaf rows theo status; progress bar chỉ dưới leaf đếm PENDING; UNSUPPORTED muted.
+
+**Tests & verification**
+- Backend: `ItemRuleEngineIT` 11 tests (event-scope QA-16, SPECIFIC_EVIDENCE_SET, EVENT_COMPLETED ledger+ordering, ALL/ANY, LEVEL_AT_LEAST reject+no-grant, validation 400 matrix, v1→v2 provenance, needs-mapping block, catalog tree, v1 compat), `ItemConditionParserTest` 8, `ItemRuleEvaluatorTest` 13, `ItemUnlockIT` 22 (2 assert đổi `RULE_UNLOCK`). `mvnw verify` **PASS 316/316**.
+- Mobile: `dart format --set-exit-if-changed` clean, `flutter analyze` 0 issues, `flutter test` **PASS 430/430**.
+
+**Docs updated:** `docs/API_SPEC.md`, `docs/DATABASE_DESIGN.md`, `docs/project-changelog.md`.
+
+## 2026-10-25 — GAME-04: Event Completion & Historical Dossier Collection
+
+**Scope:** versioned event completion policies, event progress milestones, canonical historical dossiers với unlock fan-out, learner APIs, Flutter collection tabs.
+
+**Database**
+- `V22__event_completion_dossiers.sql` — 5 bảng mới:
+  - `event_completion_policies` — versioned per event; partial unique index `ux_event_policy_published` (tối đa 1 PUBLISHED/event); `required_lesson_ids`/`optional_lesson_ids` JSONB; `mastery_threshold` SMALLINT nullable (CHECK 0..100); `status ∈ DRAFT/PUBLISHED/ARCHIVED`.
+  - `user_event_progress` — PK `(user_id, event_id, milestone)`; milestone `EVENT_COMPLETED|EVENT_MASTERED`; `policy_version` + `required_snapshot` audit.
+  - `historical_dossiers` — `canonical_code` UNIQUE; `dossier_type ∈ PERSON/LOCATION/ARTIFACT/CONTEXT`; `source_json` JSONB; `status ∈ DRAFT/PUBLISHED/ARCHIVED`; `dossier_version`.
+  - `event_dossiers` — PK `(event_id, dossier_id)`; `unlock_on='EVENT_COMPLETED'`; `sort_order`.
+  - `user_dossier_unlocks` — PK `(user_id, dossier_id)`; `event_id` provenance lần mở đầu; `dossier_version`; `granted_at`.
+- Seed idempotent: 3 events resolve theo slug (`bach-dang-938`, `hai-ba-trung-40`, `ly-thai-to-1010`), 1 PUBLISHED policy v1 mỗi event, 8 dossiers (4 PERSON, 3 LOCATION, 1 ARTIFACT) với citation thật (ĐVSKTT, Bảo tàng LSQG, Ban quản lý di tích Mê Linh, Viện Hàn lâm KHXH&NV).
+
+**Backend** (`com.dauviet.collection`)
+- `EventCompletionPolicyService`, `EventProgressEvaluator`, `EventMilestoneRecorder` (`pg_advisory_xact_lock(hashtextextended(userId|eventId))` serialize per (user,event)), `EventProgressQueryService` (reconcile-on-read idempotent), `DossierService` (visibility: DRAFT hidden / ARCHIVED hidden trừ khi đã unlock / locked PUBLISHED → preview).
+- `EventProgressController` — `GET /api/v1/me/events/{eventId}/progress`.
+- `DossierController` — `GET /api/v1/me/collection/dossiers` (filters: `type`, `eventId`, `unlocked`, page, size≤50, sort `title,id`), `GET /api/v1/me/collection/dossiers/{dossierId}`.
+- `LearnerAttemptService.doComplete()` — gọi `eventMilestones.recordIfEarned` trong cùng transaction sau rewards + item unlocks; exceptions rollback completion.
+- `CompleteAttemptResponse.newlyUnlockedDossiers` — additive `UUID[]`, rỗng trên replay/`alreadyCompleted`/`NOT_CONFIGURED`.
+
+**Mobile** (`dau-viet-mobile`)
+- Collection screen 4-tab: Dấu (existing evidence) + Nhân vật + Địa điểm + Hiện vật (dossiers qua API).
+- Dossier detail screen + route `/collection/dossiers/:dossierId`.
+- `EventProgressSection` trên campaign detail.
+- Once-only unlock banner trên lesson result screen (đọc `newlyUnlockedDossiers`).
+
+**Tests & verification**
+- Backend: `EventCompletionIT` 20 tests, `EventProgressEvaluatorTest` 10 tests, `FlywayMigrationIT` updated (18 tables). `mvnw verify` **PASS 293/293**.
+- Mobile: `flutter analyze` clean (0 issues), `flutter test` **PASS 424/424**.
+
+**Docs updated:** `docs/API_SPEC.md`, `docs/DATABASE_DESIGN.md`, `docs/LEARNING_ENGINE_DESIGN.md`, `docs/development-roadmap.md`, `docs/project-changelog.md`.
+
+## 2026-10-25 — GAME-04 FIX: Event completion, dossier integrity & mobile CI
+
+9 sửa theo task fix trên commit GAME-04 (`00815dc`). Không viết lại feature; không đụng V22.
+
+- **FIX 1 (P1)** — `V23__policy_v2_seed_audit.sql`: audit policy v1 seed của V22 (trước chọn required lesson bằng `ORDER BY created_at LIMIT 1` — arbitrary). Mỗi event có ≥1 lesson PUBLISHED: policy PUBLISHED thiếu lesson → ARCHIVE + publish v2 đủ bộ; event chưa có policy → v1 đủ bộ; không có lesson PUBLISHED → bỏ qua. Không đụng milestone/unlock đã cấp.
+- **FIX 2 (P1)** — `UserEventProgressRepository.countUnlockedDossiersForEvent`: count đổi từ "unlocks có provenance event_id=này" sang join `event_dossiers` + `user_dossier_unlocks` với `COUNT(DISTINCT dossier_id)` — dossier shared giữa hai event được đếm ở cả hai, ownership vẫn 1 row.
+- **FIX 3 (P1)** — `EventReconcileService` mới: điểm hội tụ duy nhất cho reconcile (`reconcileEvent`, `reconcileEvents`, `reconcileOwnedEvents`, `eventsWithPublishedPolicy`). `DossierService.list/detail` gọi reconcile lazy trước khi đọc (REQUIRED, không readOnly) — learner pre-GAME-04 mở Collection trực tiếp vẫn được grant; không quét toàn bộ, chỉ `visibleEventIdsOf(userId)`.
+- **FIX 4 (P2)** — `EventMilestoneRecorder.evaluateAndRecord`: fan-out dossier chạy khi `completed || completedAlready` (không chỉ `completed`) — dossier admin publish/link sau khi learner completed được grant ở reconcile kế; `EventProgressQueryService.progressOf` gọi `recordIfEarned` không điều kiện.
+- **FIX 5 (P2)** — `DossierQueryRepository` + `DossierService` + `DossierDtos`: `DossierSummaryResponse.dossierVersion` = pinned entitlement version (`user_dossier_unlocks.dossier_version`); `DossierDetailResponse` thêm `catalogVersion` = catalog hiện tại. Archive không thu hồi quyền — learner đã unlock vẫn đọc được.
+- **FIX 6 (P2)** — `LessonResultRepository.lessonsWithGradedActivity`: SQL sync với `GradedActivityClassifier` — bắt buộc stage `required:true` + activity `required:true` + (contract-graded types | EVIDENCE_SELECT graded+acceptedEvidenceIds | REASONING_CONNECT graded+(expectedRelations|acceptedRelationSets hợp lệ)). Không sửa Learning Engine.
+- **FIX 7 (P2)** — `EventProgressResponse.earnedPolicyVersion` (additive): policy_version đã cấp `EVENT_COMPLETED`. Flutter DTO + `EventProgressSection` hiển thị banner "đã hoàn thành phiên bản trước — chính sách mới bổ sung bài học" khi `earnedPolicyVersion < policyVersion`.
+- **FIX 8 (P2)** — `event_progress_section.dart` rewrite states: loading → placeholder spinner + text (không shrink); error → message + THỬ LẠI qua `ref.invalidate`; NOT_CONFIGURED giữ info trung lập.
+- **FIX 9 (P2, mandatory)** — CI `flutter analyze` fail do 5 file kebab-case (`file_names` lint): `git mv` → `main_bottom_nav.dart`, `register_screen.dart`, `stage_guidance.dart`, `onboarding_screen.dart`, `profile_screen.dart`; cập nhật 10 import. Không disable rule.
+
+**Verification**
+- Backend `./mvnw -B -ntp verify`: **305/305 PASS** (EventCompletionIT 32 tests: +multi-required 1/3-2/3-3/3, optional không block, created_at order không ảnh hưởng, shared dossier 2 events, lazy reconcile list+detail, late-linked dossier fan-out, pinned dossierVersion, archived-still-accessible, REASONING_CONNECT valid/invalid, optional-stage NOT_ASSESSED, earnedPolicyVersion).
+- Mobile `dart format --set-exit-if-changed`: clean. `flutter analyze`: 0 issues. `flutter test`: **430/430 PASS** (thêm `test/campaign/event_progress_section_test.dart` 6 widget tests).
+
+**Docs updated:** `docs/API_SPEC.md`, `docs/DATABASE_DESIGN.md`, `docs/project-changelog.md`.
+## 2026-10-29 — GAME-07 (Issue #28): Viện Thái Y end-to-end
+
+Phương án B: 4 vật phẩm Viện Thái Y + cài đặt chính sách Thể lực runtime, refill API server-authoritative, Web Admin `/thai-y-vien`, Mobile `EnergyManagementScreen` nâng cấp UI/UX Pro Max.
+
+**DB (V49)** — `V49__thai_y_vien_settings_and_remedies.sql`
+- `energy_policy_settings` singleton (id=1 CHECK): `enabled`, `max_energy` (CHECK 1..100 khớp V21), `incorrect_penalty`, `recovery_amount`, `recovery_interval_seconds` (CHECK 60..86400), `row_version`. Seed `(1,true,100,10,5,900)`.
+- `energy_remedies`: UUID PK, `code` UNIQUE immutable (trace key trong `energy_transactions.reference_json`), `rarity` CHECK COMMON/UNCOMMON/RARE/EPIC, `asset_id`?→assets, `energy_gain`, `points_cost`, `cooldown_seconds` (0=không giới hạn), `active`, `sort_order`, `row_version`. Index `idx_energy_remedies_active_sort`. Seed 4 UUIDs `e7e00000-...-0001..0004`.
+
+**Backend**
+- `EnergyPolicySetting`, `EnergyRemedy` JPA entities + repositories (`findSingleton`/`insertIgnore` + `findAllActiveOrdered`/`findActiveByCode`/`existsByCodeIgnoreCase`).
+- `EnergyTransactionRepository.findRecentRemedyUsages` (native SQL `reference_json->>'remedyCode'` `MAX(created_at)` `GROUP BY` `REASON='REFILL_PURCHASE'`) + `RemedyUsageProjection`.
+- `EnergyRefillExceptions`: `RemedyNotFoundException` (404), `RefillNotEligibleException` (422, `details{currentEnergy,maxEnergy,blockReasons}`), `RefillRateLimitedException` (409, `details{remedyCode,lastRefillAt,nextEligibleAt,serverTime}`).
+- `EnergyService` rewrite: `PolicySnapshot` record đọc DB mỗi request (không cache → admin PUT hiệu lực ngay, fallback `EnergyProperties` khi DB trống); `stateOf()` trả `pointsBalance` + `remedies[]`; `refill(userId, remedyCode, idempotencyKey)` 8-step: `IdempotencyService` → lock `user_energy` → `findActiveByCode` → `ENERGY_FULL` 422 → cooldown 409 → `wallet.debit` → `ledger.insertIgnore` → `e.credit(..., anchorNowIfFull)`. Lock order: `user_energy` → `wallet_accounts` (contract §5).
+- `AdminEnergyService` + `AdminEnergyController` `/api/v1/admin/energy`: GET/PUT `/settings` + GET/POST `/remedies` + GET/PUT/PATCH/DELETE `/remedies/{id}`.
+- `EnergyController`: POST `/me/energy/refills` yêu cầu `Idempotency-Key` header + `@Valid EnergyRefillRequest`.
+- `RewardService.summary()`: `historyPoints = max(0, earned - walletLedger.sumDebits)` (QA-19 — số dư khả dụng thay vì tích lũy suốt đời).
+- `ErrorCode` + `GlobalExceptionHandler`: `REMEDY_NOT_FOUND`/`REFILL_NOT_ELIGIBLE`/`REFILL_RATE_LIMITED`.
+
+**Web Admin `/thai-y-vien`**
+- `admin-shell.tsx`: nav item "Viện Thái Y & Thể lực" (`HeartPulse` icon); fix `History` collision với DOM type (import + `satisfies` typing).
+- `thai-y-vien-api.ts`: typed client cho settings/remedies endpoints.
+- `thai-y-vien-manager.tsx`: settings form (enabled/max/penalty/recovery + live preview math) + remedies table (rarity tag, cost/cooldown, toggle active, delete, add/edit modal, preview modal theo learner view).
+- `app/(admin)/thai-y-vien/page.tsx` — route mounted.
+
+**Mobile `EnergyManagementScreen` (UI/UX Pro Max)**
+- `energy_dto.dart`: `EnergyStateDto` +`pointsBalance` +`remedies[]`; `EnergyRemedyDto` (`isFree`/`isRateLimited`/`isEnergyFull`/`isInsufficientFunds`/`assetImagePath`/`timeUntilAvailable`); `EnergyRefillResultDto`.
+- `energy_api_client.dart` + `api_energy_repository.dart` + `mock_energy_repository.dart` + `energy_repository.dart`: `refillEnergy({remedyCode, idempotencyKey})` POST `/me/energy/refills` với `Idempotency-Key` header.
+- `energy_providers.dart`: `EnergyController.refillEnergy` sinh UUID v4 mỗi bấm, `applySnapshot` update UI ngay, invalidate `rewardSummaryProvider` + `islandWalletProvider` (QA-19).
+- `energy_management_screen.dart` rewrite: gradient parchment, `RefreshIndicator`, top bar + `_buildWalletPill` (parchmentContainer + imperialGold border + stars icon + AnimatedSwitcher), hero card Nhật Quang (SUNG MÃN/ĐIỀU HÒA/CẦN BỒI BỔ badge + 10-segment `TweenAnimationBuilder` bar + countdown recovery), 4 remedy cards với rarity icon + `Tactile3DButton` (NHẬN NGAY free heritageGreen / BỒI BỔ paid cinnabar / `Hồi sau HH:MM:SS` cooldown pill / `ĐÃ ĐẦY SINH LỰC` / `THIẾU X ĐIỂM` disabled), confirm dialog với before→after energy + wallet math (paid), success dialog `+X⚡ Thể lực` + wallet remaining.
+- Cooldown countdown dùng `timeUntilAvailable(dto.serverNow)` (server clock offset, không device-skew); `_inFlightRemedies` guard chặn double-tap.
+
+**Tests**
+- Backend `EnergyRecoveryTest` +6 tests (stateOf remedies eligibility, NUOC_VOI free credit, TRA_SEN debit, ENERGY_FULL 422, cooldown 409, paidClamp+anchor): **29/29 PASS**.
+- Backend `EnergySystemIT` +7 ITs (remedies+pointsBalance in /me/energy, NUOC_VOI refill+idempotent replay+ledger single, TRA_SEN wallet debit, atMax 422, missing-key 400, unknown-remedy 404, rate-limited 409) — Testcontainers V1–V49 (requires Docker; skipped locally per runbook).
+- Mobile `flutter test test/energy/energy_management_screen_test.dart`: **11/11 PASS** (wallet pill, 4 remedy cards, NHẬN NGAY flow, confirm dialog, ĐÃ ĐẦY/THIẾU ĐIỂM states, cooldown countdown).
+- Admin `npm run typecheck`: thai-y-vien files clean; pre-existing `island-builder/*` errors out-of-scope.
+- Mobile `flutter analyze` on touched files: **0 issues**.
+
+**Docs updated:** `docs/DATABASE_DESIGN.md`, `docs/API_SPEC.md`, `docs/GAMIFICATION_BUSINESS_RULES.md`, `docs/project-changelog.md`.

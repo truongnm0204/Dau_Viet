@@ -1,0 +1,206 @@
+"use client";
+
+import { skipToken, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Eye } from "lucide-react";
+import Link from "next/link";
+import { useSearchParams } from "next/navigation";
+import { useState } from "react";
+
+import { apiFetch } from "@/lib/api-client";
+import { parseReturnTo, withReturnTo } from "@/lib/return-to";
+import type { AdminEventDetail } from "@/lib/dto/event";
+import type { AdminLessonDetail, LessonTemplate } from "@/lib/dto/lesson";
+import type { PublishResponse } from "@/lib/dto/publish";
+import { qk } from "@/lib/query-keys";
+import { PaperCard } from "@/components/atoms/paper-card";
+import { SectionDivider } from "@/components/atoms/section-divider";
+import { StampSeal } from "@/components/atoms/stamp-seal";
+import { Button } from "@/components/ui/button";
+import { ErrorState } from "@/components/error-state";
+import { Skeleton } from "@/components/ui/skeleton";
+import { StatusChip } from "@/components/status-chip";
+import { PublishReadinessCard } from "../builder/publish-readiness-card";
+import { LessonArchiveButton } from "./lesson-archive-button";
+import { PublishButton } from "./publish-button";
+import { VerifyContentCard } from "./verify-content-card";
+
+function parseObjectives(json: string): string[] {
+  try {
+    const arr = JSON.parse(json);
+    return Array.isArray(arr) ? arr.filter((x) => typeof x === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Publish screen — lesson metadata + readiness check + publish action +
+ * post-publish learner verification. Supports republish: editing the draft
+ * of a PUBLISHED lesson and publishing again bumps versionNo while the old
+ * snapshot stays immutable.
+ */
+export function PublishPage({ lessonId }: { lessonId: string }) {
+  const qc = useQueryClient();
+  const searchParams = useSearchParams();
+  const returnTo = parseReturnTo(searchParams.get("return"));
+  const [conflict, setConflict] = useState(false);
+  const [lastPublished, setLastPublished] = useState<PublishResponse | null>(null);
+
+  const lessonQuery = useQuery({
+    queryKey: qk.lessons.detail(lessonId),
+    queryFn: () => apiFetch<AdminLessonDetail>(`/admin/lessons/${lessonId}`),
+  });
+  const lesson = lessonQuery.data;
+
+  const eventQuery = useQuery({
+    queryKey: qk.events.detail(lesson?.eventId ?? "none"),
+    queryFn: lesson?.eventId
+      ? () => apiFetch<AdminEventDetail>(`/admin/events/${lesson.eventId}`)
+      : skipToken,
+  });
+  const templatesQuery = useQuery({
+    queryKey: qk.templates.list(),
+    queryFn: () => apiFetch<LessonTemplate[]>("/admin/lesson-templates"),
+  });
+  const template = templatesQuery.data?.find((t) => t.id === lesson?.templateId);
+
+  if (lessonQuery.isPending) {
+    return (
+      <div className="flex flex-col gap-4">
+        <Skeleton className="h-8 w-80" />
+        <Skeleton className="h-64 w-full" />
+      </div>
+    );
+  }
+  if (lessonQuery.isError) {
+    return <ErrorState error={lessonQuery.error} onRetry={() => lessonQuery.refetch()} />;
+  }
+  if (!lesson) return null;
+
+  const event = eventQuery.data;
+  const objectives = parseObjectives(lesson.objectivesJson);
+  const publishedInfo = lastPublished;
+
+  return (
+    <div className="flex flex-col gap-5">
+      {returnTo && (
+        <Button asChild variant="secondary" size="sm" className="self-start">
+          <Link href={returnTo}>← Quay lại sự kiện</Link>
+        </Button>
+      )}
+      <div className="flex flex-wrap items-center gap-3">
+        <StatusChip status={lesson.status} />
+        <span className="text-sm font-medium text-ink">{lesson.title}</span>
+        <Button asChild variant="secondary" size="sm" className="ml-auto">
+          <Link href={withReturnTo(`/lessons/${lesson.id}/preview`, returnTo)}>
+            <Eye className="size-4" /> Xem trước
+          </Link>
+        </Button>
+      </div>
+
+      <div className="grid gap-4 md:grid-cols-2">
+        <PaperCard className="p-5">
+          <SectionDivider eyebrow="LIÊN KẾT" title="Sự kiện" className="mb-3" />
+          <div className="flex flex-col gap-1">
+            {eventQuery.isPending && <Skeleton className="h-6 w-48" />}
+            {event && (
+              <>
+                <p className="text-sm font-medium text-ink">{event.title}</p>
+                <div className="flex items-center gap-2">
+                  <StatusChip status={event.status} />
+                  {event.status !== "PUBLISHED" && (
+                    <Link
+                      href={`/events/${event.id}`}
+                      className="text-xs font-medium text-brand hover:underline"
+                    >
+                      Xuất bản sự kiện trước →
+                    </Link>
+                  )}
+                </div>
+              </>
+            )}
+          </div>
+        </PaperCard>
+        <PaperCard className="p-5">
+          <SectionDivider eyebrow="CẤU TRÚC" eyebrowColor="jade" title="Khung bài học" className="mb-3" />
+          <div>
+            <p className="text-sm font-medium text-ink">{template?.name ?? "—"}</p>
+            {template && <p className="mt-1 text-xs text-ink-muted">{template.description}</p>}
+          </div>
+        </PaperCard>
+      </div>
+
+      <PaperCard className="p-5">
+        <SectionDivider eyebrow="THÔNG TIN" title="Thông tin bài học" className="mb-3" />
+        <div className="flex flex-col gap-2 text-sm">
+          <div>
+            <span className="text-ink-muted">Câu hỏi trung tâm: </span>
+            <span className="text-ink">{lesson.centralQuestion}</span>
+          </div>
+          {objectives.length > 0 && (
+            <div>
+              <span className="text-ink-muted">Mục tiêu: </span>
+              <ul className="ml-4 list-disc">
+                {objectives.map((o, i) => (
+                  <li key={i} className="text-ink">{o}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+          <div className="flex items-center gap-2 text-ink-muted">
+            <span>
+              Phiên bản đang phát hành:{" "}
+              {lesson.currentVersionId ? "Đã xuất bản" : "chưa có — bài học chưa từng xuất bản"}
+            </span>
+            {lesson.currentVersionId && <StampSeal variant="success" label="ẤN HÀNH" className="scale-90" />}
+          </div>
+        </div>
+      </PaperCard>
+
+      <PublishReadinessCard lessonId={lesson.id} eventId={lesson.eventId} />
+
+      {conflict && (
+        <div className="flex flex-wrap items-center gap-3 rounded-md bg-error/10 px-3 py-2 text-sm text-error">
+          <p>Bài học đã bị sửa đồng thời — dữ liệu trên trang có thể cũ.</p>
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={async () => {
+              setConflict(false);
+              await qc.invalidateQueries({ queryKey: qk.lessons.detail(lessonId) });
+            }}
+          >
+            Tải lại bản mới nhất
+          </Button>
+        </div>
+      )}
+
+      {publishedInfo && (
+        <div
+          role="status"
+          className="flex flex-col gap-1 rounded-md bg-success/10 px-4 py-3 text-sm text-success"
+        >
+          <p className="font-semibold">
+            Đã xuất bản phiên bản {publishedInfo.versionNo} thành công.
+          </p>
+          <p className="text-xs text-ink-muted">
+            Thời điểm: {new Date(publishedInfo.publishedAt).toLocaleString("vi-VN")}
+          </p>
+        </div>
+      )}
+
+      <PublishButton
+        lesson={lesson}
+        onPublished={(res) => {
+          setConflict(false);
+          setLastPublished(res);
+        }}
+        onConflict={() => setConflict(true)}
+      />
+
+      <LessonArchiveButton lesson={lesson} />
+
+      {(lesson.currentVersionId || publishedInfo) && <VerifyContentCard lessonId={lesson.id} />}
+    </div>
+  );
+}

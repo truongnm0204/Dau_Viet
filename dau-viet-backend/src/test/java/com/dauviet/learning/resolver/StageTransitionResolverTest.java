@@ -1,0 +1,465 @@
+package com.dauviet.learning.resolver;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
+import org.junit.jupiter.api.Test;
+
+import com.dauviet.learning.contract.ActivityResult;
+import com.dauviet.learning.contract.NextStage;
+import com.dauviet.learning.domain.AttemptState;
+import com.dauviet.learning.domain.SnapshotInvalidForActivityException;
+import com.dauviet.learning.snapshot.SnapshotModel;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+
+class StageTransitionResolverTest {
+
+    private static final ObjectMapper OM = new ObjectMapper();
+    private final StageTransitionResolver resolver = new StageTransitionResolver();
+
+    private static JsonNode json(String s) {
+        try { return OM.readTree(s); } catch (Exception e) { throw new IllegalStateException(e); }
+    }
+
+    /** Linear: ctx(READ optional, r-req required) -> ev(es required) -> []. */
+    private static JsonNode linear() {
+        return json("""
+                {"stages":[
+                  {"id":"ctx","type":"CONTEXT","required":true,
+                   "activities":[
+                     {"id":"opt","type":"READ"},
+                     {"id":"rq","type":"READ","required":true}],
+                   "nextStageIds":["ev"]},
+                  {"id":"ev","type":"EVIDENCE","required":true,
+                   "activities":[{"id":"es","type":"EVIDENCE_SELECT","required":true}],
+                   "nextStageIds":[]}]}
+                """);
+    }
+
+    private static AttemptState at(String stageId, String activityId) {
+        AttemptState s = new AttemptState();
+        s.setCurrentStageId(stageId);
+        s.setCurrentActivityId(activityId);
+        return s;
+    }
+
+    @Test
+    void linear_sameStageNextRequired() {
+        SnapshotModel m = SnapshotModel.parse(linear());
+        AttemptState s = at("ctx", "opt");
+        s.markCompleted("opt");   // optional done, required pending
+        var t = resolver.resolve(m, s, "opt", ActivityResult.COMPLETED);
+        assertThat(t.nextActivity()).isNotNull();
+        assertThat(t.nextActivity().activityId()).isEqualTo("rq");
+        assertThat(t.nextActivity().stageId()).isEqualTo("ctx");
+    }
+
+    @Test
+    void linear_stageComplete_hopsForward() {
+        SnapshotModel m = SnapshotModel.parse(linear());
+        AttemptState s = at("ctx", "rq");
+        s.markCompleted("rq");
+        var t = resolver.resolve(m, s, "rq", ActivityResult.COMPLETED);
+        assertThat(t.nextStage()).isNotNull();
+        assertThat(t.nextStage().stageId()).isEqualTo("ev");
+        assertThat(t.nextStage().reason()).isEqualTo(NextStage.FORWARD);
+    }
+
+    @Test
+    void linear_allDone_returnsNull() {
+        SnapshotModel m = SnapshotModel.parse(linear());
+        AttemptState s = at("ev", "es");
+        s.markCompleted("rq");
+        s.markCompleted("es");
+        var t = resolver.resolve(m, s, "es", ActivityResult.COMPLETED);
+        assertThat(t).isNull();
+    }
+
+    @Test
+    void optionalSubmit_doesNotGateAdvance() {
+        // optional activity last in stage, required already done -> stage complete
+        SnapshotModel m = SnapshotModel.parse(linear());
+        AttemptState s = at("ctx", "rq");
+        s.markCompleted("rq");
+        // pretend current is an optional act after required â€” resolve should hop
+        var t = resolver.resolve(m, s, "rq", ActivityResult.COMPLETED);
+        assertThat(t.nextStage()).isNotNull();
+    }
+
+    @Test
+    void nonLinear_firstIncompleteTargetChosen() {
+        // A -> {B, C} -> D : B complete, C has work -> picks C over D
+        JsonNode snap = json("""
+                {"stages":[
+                  {"id":"a","type":"CONTEXT","required":true,"activities":[
+                    {"id":"aq","type":"READ","required":true}],
+                   "nextStageIds":["b","c"]},
+                  {"id":"b","type":"EVIDENCE","required":true,"activities":[
+                    {"id":"bq","type":"READ","required":true}],
+                   "nextStageIds":["d"]},
+                  {"id":"c","type":"EVIDENCE","required":true,"activities":[
+                    {"id":"cq","type":"READ","required":true}],
+                   "nextStageIds":["d"]},
+                  {"id":"d","type":"CONCLUSION","required":true,"activities":[
+                    {"id":"dq","type":"READ","required":true}],
+                   "nextStageIds":[]}]}
+                """);
+        SnapshotModel m = SnapshotModel.parse(snap);
+        AttemptState s = at("a", "aq");
+        s.markCompleted("aq");
+        s.markCompleted("bq");   // B finished already (learner visited earlier)
+        var t = resolver.resolve(m, s, "aq", ActivityResult.COMPLETED);
+        assertThat(t.nextStage().stageId()).isEqualTo("c");
+    }
+
+    @Test
+    void nonLinear_allTargetsDone_convergentFallback() {
+        // all nextStageIds complete -> fall back to first incomplete in array order
+        JsonNode snap = json("""
+                {"stages":[
+                  {"id":"a","type":"CONTEXT","required":true,"activities":[
+                    {"id":"aq","type":"READ","required":true}],
+                   "nextStageIds":["b"]},
+                  {"id":"b","type":"EVIDENCE","required":true,"activities":[
+                    {"id":"bq","type":"READ","required":true}],
+                   "nextStageIds":[]},
+                  {"id":"z","type":"CONCLUSION","required":true,"activities":[
+                    {"id":"zq","type":"READ","required":true}],
+                   "nextStageIds":[]}]}
+                """);
+        SnapshotModel m = SnapshotModel.parse(snap);
+        AttemptState s = at("a", "aq");
+        s.markCompleted("aq");
+        s.markCompleted("bq");   // the only nextStageIds target is done
+        var t = resolver.resolve(m, s, "aq", ActivityResult.COMPLETED);
+        assertThat(t.nextStage().stageId()).isEqualTo("z");
+        assertThat(t.nextStage().reason()).isEqualTo(NextStage.FORWARD);
+    }
+
+    @Test
+    void revision_partialOutcome_onPartialTarget() {
+        JsonNode snap = json("""
+                {"stages":[
+                  {"id":"hyp","type":"HYPOTHESIS","required":true,"activities":[
+                    {"id":"hc","type":"HYPOTHESIS_CHOICE","required":true}],
+                   "nextStageIds":[]},
+                  {"id":"ver","type":"VERIFICATION","required":true,"activities":[
+                    {"id":"vf","type":"VERIFICATION","required":true,
+                     "onPartial":"hyp","onContradicted":"hyp"}],
+                   "nextStageIds":[]}]}
+                """);
+        SnapshotModel m = SnapshotModel.parse(snap);
+        AttemptState s = at("ver", "vf");
+        var t = resolver.resolve(m, s, "vf", ActivityResult.PARTIAL);
+        assertThat(t.nextStage()).isNotNull();
+        assertThat(t.nextStage().stageId()).isEqualTo("hyp");
+        assertThat(t.nextStage().reason()).isEqualTo(NextStage.REVISE);
+    }
+
+    @Test
+    void revision_missingTarget_incompleteRequired_staysNotForward() {
+        // onPartial points at a stage that doesn't exist -> hop can't fire;
+        // required activity still incomplete -> cursor stays (TASK-0011 fix:
+        // previously this fell through to forward advance and soft-locked).
+        JsonNode snap = json("""
+                {"stages":[
+                  {"id":"ver","type":"VERIFICATION","required":true,"activities":[
+                    {"id":"vf","type":"VERIFICATION","required":true,
+                     "onPartial":"ghost"}],
+                   "nextStageIds":["end"]},
+                  {"id":"end","type":"CONCLUSION","required":true,"activities":[
+                    {"id":"cer","type":"CER","required":true}],
+                   "nextStageIds":[]}]}
+                """);
+        SnapshotModel m = SnapshotModel.parse(snap);
+        AttemptState s = at("ver", "vf");
+        var t = resolver.resolve(m, s, "vf", ActivityResult.PARTIAL);
+        assertThat(t.nextActivity()).isNotNull();
+        assertThat(t.nextActivity().activityId()).isEqualTo("vf");
+        assertThat(t.nextActivity().stageId()).isEqualTo("ver");
+    }
+
+    @Test
+    void revision_missingTarget_completedRequired_fallsThroughToForward() {
+        // same shape but activity already completed -> normal forward walk
+        JsonNode snap = json("""
+                {"stages":[
+                  {"id":"ver","type":"VERIFICATION","required":true,"activities":[
+                    {"id":"vf","type":"VERIFICATION","required":true,
+                     "onPartial":"ghost"}],
+                   "nextStageIds":["end"]},
+                  {"id":"end","type":"CONCLUSION","required":true,"activities":[
+                    {"id":"cer","type":"CER","required":true}],
+                   "nextStageIds":[]}]}
+                """);
+        SnapshotModel m = SnapshotModel.parse(snap);
+        AttemptState s = at("ver", "vf");
+        s.markCompleted("vf");
+        var t = resolver.resolve(m, s, "vf", ActivityResult.PARTIAL);
+        assertThat(t.nextStage().stageId()).isEqualTo("end");
+        assertThat(t.nextStage().reason()).isEqualTo(NextStage.FORWARD);
+    }
+
+    @Test
+    void cyclicSnapshot_guarded_noInfiniteLoop() {
+        // hand-edited cycle: publish validator would reject, but resolver must not loop
+        JsonNode snap = json("""
+                {"stages":[
+                  {"id":"a","type":"CONTEXT","required":true,"activities":[
+                    {"id":"aq","type":"READ","required":true}],
+                   "nextStageIds":["b"]},
+                  {"id":"b","type":"EVIDENCE","required":true,"activities":[
+                    {"id":"bq","type":"READ","required":true}],
+                   "nextStageIds":["a"]}]}
+                """);
+        SnapshotModel m = SnapshotModel.parse(snap);
+        AttemptState s = at("a", "aq");
+        s.markCompleted("aq");
+        // b incomplete -> picks b, no loop. Then completing b with cursor b
+        // walks b->a (all complete) then falls back to null.
+        var t1 = resolver.resolve(m, s, "aq", ActivityResult.COMPLETED);
+        assertThat(t1.nextStage().stageId()).isEqualTo("b");
+
+        AttemptState s2 = at("b", "bq");
+        s2.markCompleted("aq");
+        s2.markCompleted("bq");
+        var t2 = resolver.resolve(m, s2, "bq", ActivityResult.COMPLETED);
+        assertThat(t2).isNull();
+    }
+
+    /* ---- step (0): incomplete required keeps cursor (TASK-0011 fixes) ---- */
+
+    @Test
+    void requiredIncomplete_staysOnSameActivity() {
+        SnapshotModel m = SnapshotModel.parse(linear());
+        AttemptState s = at("ctx", "rq");
+        // rq required, not completed -> resolver must NOT advance past it
+        var t = resolver.resolve(m, s, "rq", ActivityResult.INCORRECT);
+        assertThat(t.nextActivity()).isNotNull();
+        assertThat(t.nextActivity().stageId()).isEqualTo("ctx");
+        assertThat(t.nextActivity().activityId()).isEqualTo("rq");
+    }
+
+    @Test
+    void requiredIncomplete_partial_outcomeDrivenHopWins() {
+        // VERIFICATION-style required act with onPartial -> REVISE hop beats stay
+        JsonNode snap = json("""
+                {"stages":[
+                  {"id":"hyp","type":"HYPOTHESIS","required":true,"activities":[
+                    {"id":"hc","type":"HYPOTHESIS_CHOICE","required":true}],
+                   "nextStageIds":[]},
+                  {"id":"ver","type":"VERIFICATION","required":true,"activities":[
+                    {"id":"vf","type":"VERIFICATION","required":true,
+                     "onPartial":"hyp","onContradicted":"hyp"}],
+                   "nextStageIds":[]}]}
+                """);
+        SnapshotModel m = SnapshotModel.parse(snap);
+        AttemptState s = at("ver", "vf");
+        var t = resolver.resolve(m, s, "vf", ActivityResult.PARTIAL);
+        assertThat(t.nextStage()).isNotNull();
+        assertThat(t.nextStage().stageId()).isEqualTo("hyp");
+        assertThat(t.nextStage().reason()).isEqualTo(NextStage.REVISE);
+    }
+
+    @Test
+    void requiredIncomplete_noHopTarget_stays() {
+        JsonNode snap = json("""
+                {"stages":[
+                  {"id":"ver","type":"VERIFICATION","required":true,"activities":[
+                    {"id":"vf","type":"VERIFICATION","required":true,
+                     "onPartial":"ghost"}],
+                   "nextStageIds":["end"]},
+                  {"id":"end","type":"CONCLUSION","required":true,"activities":[
+                    {"id":"cer","type":"CER","required":true}],
+                   "nextStageIds":[]}]}
+                """);
+        SnapshotModel m = SnapshotModel.parse(snap);
+        AttemptState s = at("ver", "vf");
+        var t = resolver.resolve(m, s, "vf", ActivityResult.PARTIAL);
+        assertThat(t.nextActivity()).isNotNull();
+        assertThat(t.nextActivity().activityId()).isEqualTo("vf");
+        assertThat(t.nextActivity().stageId()).isEqualTo("ver");
+    }
+
+    @Test
+    void optionalIncomplete_stillAdvances() {
+        SnapshotModel m = SnapshotModel.parse(linear());
+        AttemptState s = at("ctx", "opt");
+        // optional "opt" not completed â€” never blocks; next required is rq
+        var t = resolver.resolve(m, s, "opt", ActivityResult.IN_PROGRESS);
+        assertThat(t.nextActivity()).isNotNull();
+        assertThat(t.nextActivity().activityId()).isEqualTo("rq");
+    }
+
+    @Test
+    void exhausted_completedRequired_advances() {
+        // retry budget spent -> handler reported completed -> advance normally
+        SnapshotModel m = SnapshotModel.parse(linear());
+        AttemptState s = at("ctx", "rq");
+        s.markCompleted("rq");
+        var t = resolver.resolve(m, s, "rq", ActivityResult.INCORRECT);
+        assertThat(t.nextStage()).isNotNull();
+        assertThat(t.nextStage().stageId()).isEqualTo("ev");
+    }
+
+    /* ---- step (-1): remedial retry holds the cursor (TASK-0020 round-3) ---- */
+
+    /** es exhausted but remedialAttempts remain -> cursor must NOT advance. */
+    private static JsonNode remedialSnap() {
+        return json("""
+                {"stages":[
+                  {"id":"ev","type":"EVIDENCE","required":true,"activities":[
+                    {"id":"es","type":"EVIDENCE_SELECT","required":true,
+                     "config":{"maxAttempts":2,"remedialAttempts":1}}],
+                   "nextStageIds":["rs"]},
+                  {"id":"rs","type":"REASONING","required":true,"activities":[
+                    {"id":"rc","type":"REASONING_CONNECT","required":true}],
+                   "nextStageIds":[]}]}
+                """);
+    }
+
+    @Test
+    void remedialRetry_exhaustedWithBudgetLeft_holdsCursor() {
+        SnapshotModel m = SnapshotModel.parse(remedialSnap());
+        AttemptState s = at("ev", "es");
+        s.recordOutput("es", json(
+                "{\"exhausted\":true,\"attemptCount\":2,\"correct\":false}"));
+        s.markCompleted("es");   // exhausted completed-for-progress
+        var t = resolver.resolve(m, s, "es", ActivityResult.INCORRECT);
+        assertThat(t.nextActivity()).isNotNull();
+        assertThat(t.nextActivity().stageId()).isEqualTo("ev");
+        assertThat(t.nextActivity().activityId()).isEqualTo("es");
+    }
+
+    @Test
+    void remedialRetry_budgetSpent_advancesNormally() {
+        // attemptCount == maxAttempts + remedialAttempts -> nothing left
+        SnapshotModel m = SnapshotModel.parse(remedialSnap());
+        AttemptState s = at("ev", "es");
+        s.recordOutput("es", json(
+                "{\"exhausted\":true,\"attemptCount\":3,\"correct\":false}"));
+        s.markCompleted("es");
+        var t = resolver.resolve(m, s, "es", ActivityResult.INCORRECT);
+        assertThat(t.nextStage()).isNotNull();
+        assertThat(t.nextStage().stageId()).isEqualTo("rs");
+    }
+
+    @Test
+    void remedialRetry_noRemedialConfig_advancesNormally() {
+        // legacy snapshots without remedialAttempts keep the old contract:
+        // exhausted -> completed -> advance (bounded by Verification hops).
+        JsonNode snap = json("""
+                {"stages":[
+                  {"id":"ev","type":"EVIDENCE","required":true,"activities":[
+                    {"id":"es","type":"EVIDENCE_SELECT","required":true,
+                     "config":{"maxAttempts":2}}],
+                   "nextStageIds":["rs"]},
+                  {"id":"rs","type":"REASONING","required":true,"activities":[
+                    {"id":"rc","type":"REASONING_CONNECT","required":true}],
+                   "nextStageIds":[]}]}
+                """);
+        SnapshotModel m = SnapshotModel.parse(snap);
+        AttemptState s = at("ev", "es");
+        s.recordOutput("es", json(
+                "{\"exhausted\":true,\"attemptCount\":2,\"correct\":false}"));
+        s.markCompleted("es");
+        var t = resolver.resolve(m, s, "es", ActivityResult.INCORRECT);
+        assertThat(t.nextStage()).isNotNull();
+        assertThat(t.nextStage().stageId()).isEqualTo("rs");
+    }
+
+    @Test
+    void remedialRetry_correctResubmit_advances() {
+        // correct remedial answer -> not exhausted anymore -> normal advance
+        SnapshotModel m = SnapshotModel.parse(remedialSnap());
+        AttemptState s = at("ev", "es");
+        s.recordOutput("es", json(
+                "{\"remedial\":true,\"attemptCount\":3,\"correct\":true}"));
+        s.markCompleted("es");
+        var t = resolver.resolve(m, s, "es", ActivityResult.COMPLETED);
+        assertThat(t.nextStage()).isNotNull();
+        assertThat(t.nextStage().stageId()).isEqualTo("rs");
+    }
+
+    @Test
+    void exhaustedVerification_partial_doesNotHop_advancesForward() {
+        // TASK-0020 round-3: a bounded VERIFICATION that spent its budget
+        // (output exhausted:true, outcome still PARTIAL) must NOT take the
+        // onPartial hop — hopping back to an upstream activity that can no
+        // longer change its output is the second soft-lock shape.
+        JsonNode snap = json("""
+                {"stages":[
+                  {"id":"ev","type":"EVIDENCE","required":true,"activities":[
+                    {"id":"es","type":"EVIDENCE_SELECT","required":true}],
+                   "nextStageIds":["vf"]},
+                  {"id":"vf","type":"VERIFICATION","required":true,"activities":[
+                    {"id":"vf1","type":"VERIFICATION","required":true,
+                     "onPartial":"ev","config":{"maxAttempts":2}}],
+                   "nextStageIds":["cc"]},
+                  {"id":"cc","type":"CONCLUSION","required":true,"activities":[
+                    {"id":"cer","type":"CER_CHOICE","required":true}],
+                   "nextStageIds":[]}]}
+                """);
+        SnapshotModel m = SnapshotModel.parse(snap);
+        AttemptState s = at("vf", "vf1");
+        s.markCompleted("es");
+        s.recordOutput("vf1", json(
+                "{\"verification\":\"PARTIAL\",\"attemptCount\":2,\"exhausted\":true}"));
+        s.markCompleted("vf1");
+        var t = resolver.resolve(m, s, "vf1", ActivityResult.PARTIAL);
+        assertThat(t.nextStage()).isNotNull();
+        assertThat(t.nextStage().stageId()).isEqualTo("cc");
+        assertThat(t.nextStage().reason()).isEqualTo(NextStage.FORWARD);
+    }
+
+    @Test
+    void unexhaustedVerification_partial_stillHops() {
+        // Same shape but budget not yet spent -> the REVISE hop still fires.
+        JsonNode snap = json("""
+                {"stages":[
+                  {"id":"ev","type":"EVIDENCE","required":true,"activities":[
+                    {"id":"es","type":"EVIDENCE_SELECT","required":true}],
+                   "nextStageIds":["vf"]},
+                  {"id":"vf","type":"VERIFICATION","required":true,"activities":[
+                    {"id":"vf1","type":"VERIFICATION","required":true,
+                     "onPartial":"ev","config":{"maxAttempts":2}}],
+                   "nextStageIds":["cc"]},
+                  {"id":"cc","type":"CONCLUSION","required":true,"activities":[
+                    {"id":"cer","type":"CER_CHOICE","required":true}],
+                   "nextStageIds":[]}]}
+                """);
+        SnapshotModel m = SnapshotModel.parse(snap);
+        AttemptState s = at("vf", "vf1");
+        s.markCompleted("es");
+        s.recordOutput("vf1", json(
+                "{\"verification\":\"PARTIAL\",\"attemptCount\":1}"));
+        var t = resolver.resolve(m, s, "vf1", ActivityResult.PARTIAL);
+        assertThat(t.nextStage()).isNotNull();
+        assertThat(t.nextStage().stageId()).isEqualTo("ev");
+        assertThat(t.nextStage().reason()).isEqualTo(NextStage.REVISE);
+    }
+
+    @Test
+    void requiredFreeStageTraversed_transparently() {
+        // stage with NO required activities sits between two real stages
+        JsonNode snap = json("""
+                {"stages":[
+                  {"id":"a","type":"CONTEXT","required":true,"activities":[
+                    {"id":"aq","type":"READ","required":true}],
+                   "nextStageIds":["mid"]},
+                  {"id":"mid","type":"CONTEXT","activities":[
+                    {"id":"opt","type":"READ"}],
+                   "nextStageIds":["b"]},
+                  {"id":"b","type":"EVIDENCE","required":true,"activities":[
+                    {"id":"bq","type":"READ","required":true}],
+                   "nextStageIds":[]}]}
+                """);
+        SnapshotModel m = SnapshotModel.parse(snap);
+        AttemptState s = at("a", "aq");
+        s.markCompleted("aq");
+        var t = resolver.resolve(m, s, "aq", ActivityResult.COMPLETED);
+        // mid is required-free -> transparent -> traversed through to b
+        assertThat(t.nextStage().stageId()).isEqualTo("b");
+    }
+}

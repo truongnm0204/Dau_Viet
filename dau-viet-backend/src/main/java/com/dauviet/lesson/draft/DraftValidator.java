@@ -1,0 +1,886 @@
+package com.dauviet.lesson.draft;
+
+import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.Deque;
+import java.util.EnumMap;
+import java.util.EnumSet;
+import java.util.LinkedHashSet;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.UUID;
+import java.util.stream.Collectors;
+
+import org.springframework.stereotype.Service;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+
+import com.dauviet.lesson.domain.EvidenceStatus;
+import com.dauviet.lesson.infrastructure.persistence.AssetRepository;
+import com.dauviet.lesson.infrastructure.persistence.EvidenceRepository;
+
+/**
+ * Validates the canonical draft_json v1 document.
+ * Two levels: SAVE tolerates incomplete drafts; PUBLISH enforces all
+ * LEARNING_ENGINE_DESIGN §9 guardrails and evidence/asset existence.
+ * Never logs or echoes `validation`/`config.correct*` contents — paths only.
+ */
+@Service
+public class DraftValidator {
+
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    private final Map<ActivityType, ActivityConfigValidator> registry;
+    private final EvidenceRepository evidences;
+    private final AssetRepository assets;
+    private final com.dauviet.animation.infrastructure.persistence
+            .AnimationSceneVersionRepository sceneVersions;
+
+    public DraftValidator(List<ActivityConfigValidator> impls,
+                          EvidenceRepository evidences,
+                          AssetRepository assets,
+                          com.dauviet.animation.infrastructure.persistence
+                                  .AnimationSceneVersionRepository sceneVersions) {
+        Map<ActivityType, ActivityConfigValidator> map = new EnumMap<>(ActivityType.class);
+        for (ActivityConfigValidator v : impls) {
+            ActivityConfigValidator prev = map.put(v.supports(), v);
+            if (prev != null) {
+                throw new IllegalStateException(
+                        "duplicate validator for " + v.supports() + ": "
+                        + prev.getClass().getName() + " and " + v.getClass().getName());
+            }
+        }
+        this.registry = map;
+        this.evidences = evidences;
+        this.assets = assets;
+        this.sceneVersions = sceneVersions;
+    }
+
+    /**
+     * Validate the full draft. Returns an ordered, never-null error list.
+     * draftJson may be null/blank — treated as empty document.
+     */
+    public List<FieldError> validate(JsonNode draft, UUID eventId, ValidationLevel level) {
+        List<FieldError> errors = new ArrayList<>();
+        if (draft == null || draft.isNull()) {
+            if (level == ValidationLevel.PUBLISH) {
+                errors.add(new FieldError("$", "MISSING_DRAFT", "draft must not be empty"));
+            }
+            return errors;
+        }
+        if (!draft.isObject()) {
+            errors.add(new FieldError("$", "INVALID_DRAFT", "draft must be a JSON object"));
+            return errors;
+        }
+
+        checkUnknownKeys(draft, DraftSchema.TOP_LEVEL_KEYS, "$", errors);
+        validateSchemaVersion(draft, level, errors);
+
+        Set<String> stageIds = new HashSet<>();
+        Map<String, JsonNode> stageById = new HashMap<>();
+        Map<String, List<String>> transitions = new HashMap<>();
+        // Single PUBLISH-level lookup context shared by the whole draft walk
+        // so evidence/asset queries are issued once per validate() call.
+        ValidationContext ctx = buildContext(eventId, level);
+
+        JsonNode stages = draft.get("stages");
+        if (stages != null && stages.isArray()) {
+            // Activity ids share one global namespace inside a snapshot —
+            // the runtime indexes activities by id alone, so a collision
+            // across stages would silently shadow an activity.
+            Set<String> activityIds = new HashSet<>();
+            validateStages(stages, stageIds, stageById, transitions, activityIds, ctx, errors);
+        } else if (level == ValidationLevel.PUBLISH) {
+            errors.add(new FieldError("stages", "MISSING_FIELD", "stages array required"));
+        }
+
+        validateStageGraph(draft, stageIds, transitions, level, errors);
+        validateCompletion(draft.get("completion"), stageIds, level, errors);
+        validateFourStepModel(draft, stageById, ctx, errors);
+        if (level == ValidationLevel.PUBLISH) {
+            validatePublishGuardrails(stageIds, stageById, draft.get("completion"), errors);
+        }
+        return errors;
+    }
+
+    /* ---------- structural ---------- */
+
+    private void validateSchemaVersion(JsonNode draft, ValidationLevel level,
+                                       List<FieldError> errors) {
+        JsonNode sv = draft.get("schemaVersion");
+        if (sv == null) {
+            // Missing is tolerated at SAVE (author may still be assembling the
+            // draft) but a publishable snapshot must declare its schema version.
+            if (level == ValidationLevel.PUBLISH) {
+                errors.add(new FieldError("schemaVersion", "MISSING_FIELD",
+                        "schemaVersion is required and must be " + DraftSchema.CURRENT_VERSION));
+            }
+            return;
+        }
+        if (!sv.isInt() || sv.asInt() != DraftSchema.CURRENT_VERSION) {
+            errors.add(new FieldError("schemaVersion", "UNSUPPORTED_SCHEMA_VERSION",
+                    "schemaVersion must be " + DraftSchema.CURRENT_VERSION));
+        }
+    }
+
+    private void checkUnknownKeys(JsonNode node, Set<String> allowed, String path,
+                                  List<FieldError> errors) {
+        node.fieldNames().forEachRemaining(name -> {
+            if (!allowed.contains(name)) {
+                errors.add(new FieldError(path + "." + name, "UNKNOWN_FIELD",
+                        "field '" + name + "' is not allowed"));
+            }
+        });
+    }
+
+    private void validateStages(JsonNode stages, Set<String> stageIds,
+                                Map<String, JsonNode> stageById,
+                                Map<String, List<String>> transitions,
+                                Set<String> activityIds,
+                                ValidationContext ctx,
+                                List<FieldError> errors) {
+        for (int i = 0; i < stages.size(); i++) {
+            JsonNode stage = stages.get(i);
+            String base = "stages[" + i + "]";
+            if (!stage.isObject()) {
+                errors.add(new FieldError(base, "INVALID_TYPE", "stage must be an object"));
+                continue;
+            }
+            checkUnknownKeys(stage, DraftSchema.STAGE_KEYS, base, errors);
+            String id = validateId(stage.get("id"), base + ".id", errors);
+            if (id != null && !stageIds.add(id)) {
+                errors.add(new FieldError(base + ".id", "DUPLICATE_ID",
+                        "duplicate stage id '" + id + "'"));
+            }
+            if (id != null) stageById.put(id, stage);
+
+            StageType st = parseEnum(StageType.class, stage.get("type"),
+                    base + ".type", "UNKNOWN_STAGE_TYPE", errors);
+
+            collectTransitions(stage, id, transitions, errors, base);
+            validateStageEvidenceRefs(stage, base, ctx, errors);
+            validateActivities(stage, st, base, activityIds, ctx, errors);
+        }
+        validateActivitySourceRefs(stages, stageById, transitions, ctx, errors);
+    }
+
+    /**
+     * Cross-activity source references (Learning Flow 2.0 §P0/§P5):
+     * config.priorEvidenceSource (CER_CHOICE) and config.evidenceSource
+     * (VERIFICATION) name the upstream activity whose output the consumer
+     * reuses. At PUBLISH each reference must point to a real activity that
+     * (a) produces evidence selections (EVIDENCE_SELECT), and (b) is
+     * guaranteed to execute BEFORE the consumer on the forward learning
+     * path:
+     *  - same stage: the source must be declared earlier in the activities
+     *    array (siblings execute in order — a source listed after the
+     *    consumer has not run yet when the consumer is evaluated);
+     *  - different stage: the source stage must reach the consumer's stage
+     *    via nextStageIds only.
+     * Revision hops (onPartial/onContradicted) are navigation — reaching the
+     * source stage backwards does NOT mean the source's output already
+     * exists when the consumer runs, so hop edges never justify a
+     * reference. Optional stages sit outside the required path, but a
+     * forward edge is still required: referencing an unreachable sibling
+     * branch is rejected rather than silently grading against an empty set.
+     */
+    private void validateActivitySourceRefs(JsonNode stages,
+                                            Map<String, JsonNode> stageById,
+                                            Map<String, List<String>> transitions,
+                                            ValidationContext ctx,
+                                            List<FieldError> errors) {
+        if (stages == null || !stages.isArray()) return;
+        // activity id -> (stage id, type) + within-stage order index
+        Map<String, String> activityStage = new HashMap<>();
+        Map<String, String> activityType = new HashMap<>();
+        Map<String, Integer> activityIndex = new HashMap<>();
+        for (int i = 0; i < stages.size(); i++) {
+            JsonNode stage = stages.get(i);
+            if (!stage.isObject()) continue;
+            String sid = stage.path("id").asText(null);
+            if (sid == null) continue;
+            JsonNode acts = stage.get("activities");
+            if (acts != null && acts.isArray()) {
+                for (int j = 0; j < acts.size(); j++) {
+                    JsonNode act = acts.get(j);
+                    String aid = act.path("id").asText(null);
+                    if (aid == null) continue;
+                    activityStage.put(aid, sid);
+                    activityType.put(aid, act.path("type").asText(""));
+                    activityIndex.put(aid, j);
+                }
+            }
+        }
+        // Forward-only reachability: nextStageIds edges exclusively —
+        // revision hops are deliberately excluded (navigation, not proof
+        // the source already produced an output).
+        Map<String, Set<String>> reach = new HashMap<>();
+        for (String sid : stageById.keySet()) {
+            reach.put(sid, reachableFrom(sid, transitions));
+        }
+        // activity id -> required flag (for guaranteed-source checks)
+        Map<String, Boolean> activityRequired = new HashMap<>();
+        Map<String, Boolean> stageRequired = new HashMap<>();
+        for (int i = 0; i < stages.size(); i++) {
+            JsonNode stage = stages.get(i);
+            if (!stage.isObject()) continue;
+            String sid = stage.path("id").asText(null);
+            if (sid == null) continue;
+            stageRequired.put(sid, stage.path("required").asBoolean(false));
+            JsonNode acts = stage.get("activities");
+            if (acts != null && acts.isArray()) {
+                for (JsonNode act : acts) {
+                    String aid = act.path("id").asText(null);
+                    if (aid == null) continue;
+                    activityRequired.put(aid,
+                            act.path("required").asBoolean(false));
+                }
+            }
+        }
+        for (int i = 0; i < stages.size(); i++) {
+            JsonNode stage = stages.get(i);
+            if (!stage.isObject()) continue;
+            String sid = stage.path("id").asText(null);
+            JsonNode acts = stage.get("activities");
+            if (acts == null || !acts.isArray()) continue;
+            for (int j = 0; j < acts.size(); j++) {
+                JsonNode act = acts.get(j);
+                String apath = "stages[id=" + sid + "].activities[" + j + "]";
+                for (String field : List.of("priorEvidenceSource", "evidenceSource")) {
+                    JsonNode src = act.path("config").path(field);
+                    if (!src.isTextual()) continue;
+                    String srcId = src.asText();
+                    String refPath = apath + ".config." + field;
+                    String srcStage = activityStage.get(srcId);
+                    if (srcStage == null) {
+                        if (ctx.isPublish()) {
+                            errors.add(new FieldError(refPath, "UNKNOWN_ACTIVITY_ID",
+                                    field + " '" + srcId + "' does not name an activity"));
+                        }
+                        continue;
+                    }
+                    if (!ActivityType.EVIDENCE_SELECT.name()
+                            .equals(activityType.get(srcId))) {
+                        errors.add(new FieldError(refPath, "INVALID_CONFIG",
+                                field + " must reference an EVIDENCE_SELECT activity"));
+                        continue;
+                    }
+                    boolean canPrecede;
+                    if (srcStage.equals(sid)) {
+                        // Siblings run in declaration order — the source must
+                        // sit strictly before the consumer.
+                        Integer srcIdx = activityIndex.get(srcId);
+                        canPrecede = srcIdx != null && srcIdx < j;
+                    } else {
+                        // Cross-stage: forward nextStageIds path only.
+                        canPrecede = reach.getOrDefault(srcStage, Set.of())
+                                .contains(sid);
+                    }
+                    if (!canPrecede) {
+                        errors.add(new FieldError(refPath, "UNREACHABLE_SOURCE",
+                                field + " '" + srcId
+                                        + "' cannot execute before this activity"));
+                        continue;
+                    }
+                    // TASK-0020 round-3 FIX 2: reachability ≠ guaranteed
+                    // execution. A REQUIRED consumer that declares an
+                    // upstream evidence source must be able to rely on that
+                    // source actually running — an optional-flagged source
+                    // activity, or one inside an optional/skippable stage,
+                    // can be skipped entirely and leaves the consumer's
+                    // verification/conclusion unsolvable. Reject the draft
+                    // rather than silently grade against an empty set.
+                    if (ctx.isPublish()
+                            && activityRequired.getOrDefault(act.path("id").asText(), false)) {
+                        if (!Boolean.TRUE.equals(stageRequired.get(srcStage))) {
+                            errors.add(new FieldError(refPath, "UNGUARANTEED_SOURCE",
+                                    field + " '" + srcId
+                                            + "' sits in an optional stage '"
+                                            + srcStage
+                                            + "' and may never run — a required consumer cannot depend on it"));
+                        } else if (!activityRequired.getOrDefault(srcId, false)) {
+                            errors.add(new FieldError(refPath, "UNGUARANTEED_SOURCE",
+                                    field + " '" + srcId
+                                            + "' is not required and may be skipped — a required consumer cannot depend on it"));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private void collectTransitions(JsonNode stage, String stageId,
+                                    Map<String, List<String>> transitions,
+                                    List<FieldError> errors, String base) {
+        JsonNode next = stage.get("nextStageIds");
+        if (next == null || !next.isArray()) {
+            transitions.put(stageId, List.of());
+            return;
+        }
+        List<String> targets = new ArrayList<>();
+        for (int i = 0; i < next.size(); i++) {
+            JsonNode t = next.get(i);
+            if (!t.isTextual()) {
+                errors.add(new FieldError(base + ".nextStageIds[" + i + "]",
+                        "INVALID_TYPE", "transition target must be a string"));
+                continue;
+            }
+            targets.add(t.asText());
+        }
+        transitions.put(stageId, targets);
+    }
+
+    private void validateStageEvidenceRefs(JsonNode stage, String base,
+                                           ValidationContext ctx,
+                                           List<FieldError> errors) {
+        if (!ctx.isPublish()) return;
+        JsonNode refs = stage.get("requiredEvidenceIds");
+        if (refs == null || !refs.isArray()) return;
+        for (int i = 0; i < refs.size(); i++) {
+            String evId = refs.get(i).asText();
+            if (!ctx.evidenceUsable(evId)) {
+                errors.add(new FieldError(base + ".requiredEvidenceIds[" + i + "]",
+                        "EVIDENCE_NOT_FOUND", "evidence '" + evId + "' not usable for this event"));
+            }
+        }
+    }
+
+    private void validateActivities(JsonNode stage, StageType stageType,
+                                    String stagePath, Set<String> activityIds,
+                                    ValidationContext ctx,
+                                    List<FieldError> errors) {
+        JsonNode acts = stage.get("activities");
+        if (acts == null || !acts.isArray()) return;
+        Set<ClueType> seenClues = EnumSet.noneOf(ClueType.class);
+        boolean anyClueTagged = false;
+        for (int j = 0; j < acts.size(); j++) {
+            JsonNode act = acts.get(j);
+            String apath = stagePath + ".activities[" + j + "]";
+            if (!act.isObject()) {
+                errors.add(new FieldError(apath, "INVALID_TYPE", "activity must be an object"));
+                continue;
+            }
+            checkUnknownKeys(act, DraftSchema.ACTIVITY_KEYS, apath, errors);
+            String actId = validateId(act.get("id"), apath + ".id", errors);
+            if (actId != null && !activityIds.add(actId)) {
+                errors.add(new FieldError(apath + ".id", "DUPLICATE_ID",
+                        "duplicate activity id '" + actId + "'"));
+            }
+            ActivityType at = parseEnum(ActivityType.class, act.get("type"),
+                    apath + ".type", "UNSUPPORTED_ACTIVITY_TYPE", errors);
+            if (at != null && stageType != null
+                    && !DraftSchema.STAGE_ALLOWED_ACTIVITIES.get(stageType).contains(at)) {
+                errors.add(new FieldError(apath + ".type", "STAGE_ACTIVITY_MISMATCH",
+                        "activity type " + at + " not allowed in stage " + stageType));
+            }
+            if (act.hasNonNull("clueType")) {
+                anyClueTagged = true;
+                ClueType ct = parseEnum(ClueType.class, act.get("clueType"),
+                        apath + ".clueType", "UNKNOWN_CLUE_TYPE", errors);
+                if (ct != null && !seenClues.add(ct)) {
+                    errors.add(new FieldError(apath + ".clueType", "DUPLICATE_CLUE_TYPE",
+                            "duplicate clueType '" + ct + "' in stage"));
+                }
+            }
+            if (act.hasNonNull("coverAssetId")) {
+                JsonNode coverNode = act.get("coverAssetId");
+                if (!coverNode.isTextual() || !isUuidString(coverNode.asText())) {
+                    errors.add(new FieldError(apath + ".coverAssetId", "INVALID_ID",
+                            "coverAssetId must be a valid UUID string"));
+                } else if (ctx.isPublish() && !ctx.assetUsable(coverNode.asText())) {
+                    errors.add(new FieldError(apath + ".coverAssetId", "ASSET_NOT_FOUND",
+                            "asset '" + coverNode.asText() + "' not active"));
+                }
+            }
+            ActivityConfigValidator v = at == null ? null : registry.get(at);
+            if (v != null) {
+                v.validate(act, apath, ctx, errors);
+            }
+            // Validate optional animation refs on non-READ activities as well
+            if (at != null && at != ActivityType.READ
+                    && act.has("config") && act.get("config").isObject()) {
+                com.dauviet.lesson.draft.validators.SimpleActivityValidators.ReadValidator
+                        .validateAnimationRef(act.get("config"), apath, ctx, errors);
+            }
+            // Stage-level evidence refs inside an activity
+            JsonNode evRefs = act.get("evidenceRefs");
+            if (ctx.isPublish() && evRefs != null && evRefs.isArray()) {
+                for (int k = 0; k < evRefs.size(); k++) {
+                    String evId = evRefs.get(k).asText();
+                    if (!ctx.evidenceUsable(evId)) {
+                        errors.add(new FieldError(apath + ".evidenceRefs[" + k + "]",
+                                "EVIDENCE_NOT_FOUND",
+                                "evidence '" + evId + "' not usable for this event"));
+                    }
+                }
+            }
+        }
+        if (stageType == StageType.DISCOVERY && anyClueTagged && ctx.isPublish()) {
+            validateDiscoveryClueStage(acts, seenClues, stagePath, errors);
+        }
+    }
+
+    /* ---------- stage graph ---------- */
+
+    private void validateStageGraph(JsonNode draft,
+                                    Set<String> stageIds,
+                                    Map<String, List<String>> transitions,
+                                    ValidationLevel level,
+                                    List<FieldError> errors) {
+        // Unknown targets
+        for (Map.Entry<String, List<String>> e : transitions.entrySet()) {
+            for (String target : e.getValue()) {
+                if (!stageIds.contains(target)) {
+                    errors.add(new FieldError("stages[id=" + e.getKey() + "].nextStageIds",
+                            "UNKNOWN_STAGE_ID", "stage '" + target + "' not found"));
+                }
+            }
+        }
+        // Cycle detection — three-colour iterative DFS over the whole graph.
+        // GRAY nodes are on the current DFS path; an edge to a GRAY node is a
+        // back-edge, i.e. a real directed cycle. Converging paths (diamonds,
+        // shared destinations) revisit only BLACK nodes and are NOT cycles.
+        Map<String, Integer> color = new HashMap<>();
+        for (String start : stageIds) {
+            if (color.containsKey(start)) continue;
+            String cycleAt = findCycle(start, transitions, color);
+            if (cycleAt != null) {
+                errors.add(new FieldError("stages[id=" + cycleAt + "].nextStageIds",
+                        "CIRCULAR_TRANSITION", "cycle detected through stage '" + cycleAt + "'"));
+                break;
+            }
+        }
+        // Reachable terminal stage — PUBLISH only. The entry stage is
+        // stages[0] in array order; the lesson must be able to end, so a
+        // stage with empty nextStageIds must be reachable from the entry.
+        if (level == ValidationLevel.PUBLISH && !stageIds.isEmpty()) {
+            JsonNode stages = draft.get("stages");
+            String entry = (stages != null && stages.isArray() && !stages.isEmpty()
+                    && stages.get(0).isObject())
+                    ? stages.get(0).path("id").asText(null) : null;
+            Set<String> reachable = entry == null ? Set.of()
+                    : reachableFrom(entry, transitions);
+            boolean terminalReachable = reachable.stream()
+                    .anyMatch(s -> transitions.getOrDefault(s, List.of()).isEmpty());
+            if (!terminalReachable) {
+                errors.add(new FieldError("stages", "NO_TERMINAL_STAGE",
+                        "no terminal stage (empty nextStageIds) is reachable from the entry stage"));
+            }
+        }
+    }
+
+    private static final int WHITE = 0; // unvisited
+    private static final int GRAY = 1;  // on current DFS path
+    private static final int BLACK = 2; // fully explored
+
+    /**
+     * Iterative three-colour DFS. Returns the stage id where a back-edge was
+     * found (a real directed cycle), or null when the component is a DAG.
+     * Frames on the stack are (node, nextChildIndex); a node turns BLACK only
+     * after all children are explored, so GRAY always means "ancestor".
+     */
+    private String findCycle(String start, Map<String, List<String>> graph,
+                             Map<String, Integer> color) {
+        Deque<String> nodes = new ArrayDeque<>();
+        Deque<int[]> cursors = new ArrayDeque<>();
+        color.put(start, GRAY);
+        nodes.push(start);
+        cursors.push(new int[]{0});
+        while (!nodes.isEmpty()) {
+            String node = nodes.peek();
+            int[] cursor = cursors.peek();
+            List<String> next = graph.getOrDefault(node, List.of());
+            if (cursor[0] >= next.size()) {
+                color.put(node, BLACK);
+                nodes.pop();
+                cursors.pop();
+                continue;
+            }
+            String child = next.get(cursor[0]++);
+            Integer c = color.getOrDefault(child, WHITE);
+            if (c == GRAY) return child;
+            if (c == WHITE) {
+                color.put(child, GRAY);
+                nodes.push(child);
+                cursors.push(new int[]{0});
+            }
+        }
+        return null;
+    }
+
+    /** BFS over nextStageIds edges; returns all stage ids reachable from `entry`. */
+    private Set<String> reachableFrom(String entry, Map<String, List<String>> graph) {
+        Set<String> seen = new HashSet<>();
+        Deque<String> queue = new ArrayDeque<>();
+        if (entry != null) {
+            seen.add(entry);
+            queue.add(entry);
+        }
+        while (!queue.isEmpty()) {
+            for (String next : graph.getOrDefault(queue.poll(), List.of())) {
+                if (seen.add(next)) queue.add(next);
+            }
+        }
+        return seen;
+    }
+
+    /* ---------- completion ---------- */
+
+    private void validateCompletion(JsonNode completion, Set<String> stageIds,
+                                    ValidationLevel level, List<FieldError> errors) {
+        if (completion == null) return;
+        if (!completion.isObject()) {
+            errors.add(new FieldError("completion", "INVALID_TYPE",
+                    "completion must be an object"));
+            return;
+        }
+        checkUnknownKeys(completion, DraftSchema.COMPLETION_KEYS, "completion", errors);
+        // An empty object selects no completion clause. At runtime it falls
+        // back to DEFAULT_ALL_REQUIRED (same as an absent completion), so
+        // publishing it is either a mistake or a redundant no-op — reject to
+        // keep authoring intent explicit and consistent with the evaluator.
+        if (level == ValidationLevel.PUBLISH && completion.isEmpty()) {
+            errors.add(new FieldError("completion", "EMPTY_COMPLETION",
+                    "empty completion object: declare a clause or omit the field"));
+            return;
+        }
+        JsonNode reqIds = completion.get("requiredStageIds");
+        if (reqIds != null && reqIds.isArray()) {
+            for (int i = 0; i < reqIds.size(); i++) {
+                String sid = reqIds.get(i).asText();
+                if (!stageIds.contains(sid)) {
+                    errors.add(new FieldError("completion.requiredStageIds[" + i + "]",
+                            "UNKNOWN_STAGE_ID", "stage '" + sid + "' not found"));
+                }
+            }
+        }
+    }
+
+    /** PUBLISH-level guardrails that need the full parsed stage set. */
+    private void validatePublishGuardrails(Set<String> stageIds,
+                                           Map<String, JsonNode> stageById,
+                                           JsonNode completion,
+                                           List<FieldError> errors) {
+        // At least one required stage must carry a non-READ required activity,
+        // otherwise the lesson is a passive READ with no assessment.
+        boolean hasRequiredInteractive = false;
+        boolean hasRequiredStage = false;
+        for (String sid : stageIds) {
+            JsonNode stage = stageById.get(sid);
+            if (stage == null || !stage.path("required").asBoolean(false)) continue;
+            hasRequiredStage = true;
+            JsonNode acts = stage.get("activities");
+            if (acts == null || !acts.isArray()) continue;
+            for (JsonNode act : acts) {
+                if (act.path("required").asBoolean(false)
+                        && !"READ".equals(act.path("type").asText())) {
+                    hasRequiredInteractive = true;
+                    break;
+                }
+            }
+            if (hasRequiredInteractive) break;
+        }
+        if (!hasRequiredInteractive) {
+            errors.add(new FieldError("stages", "NO_REQUIRED_ACTIVITY",
+                    "at least one required stage must contain a required non-READ activity"));
+        }
+        // requireAllRequiredStages==true is meaningless without a required stage
+        if (completion != null && completion.isObject()
+                && completion.path("requireAllRequiredStages").asBoolean(false)
+                && !hasRequiredStage) {
+            errors.add(new FieldError("completion.requireAllRequiredStages",
+                    "INVALID_CONFIG",
+                    "requireAllRequiredStages=true but no stage has required=true"));
+        }
+        // An activity flagged required inside an optional stage can never
+        // gate anything: the stage flag makes its activities optional for
+        // progress, transition and default completion, so the flag only
+        // takes effect through an explicit completion.requiredStageIds.
+        // Reject the contradictory shape at publish — either make the stage
+        // required or drop the activity flag (BA: optional stage = optional
+        // content, e.g. Reflection).
+        for (String sid : stageIds) {
+            JsonNode stage = stageById.get(sid);
+            if (stage == null || stage.path("required").asBoolean(false)) continue;
+            JsonNode acts = stage.get("activities");
+            if (acts == null || !acts.isArray()) continue;
+            for (int i = 0; i < acts.size(); i++) {
+                if (acts.get(i).path("required").asBoolean(false)) {
+                    errors.add(new FieldError(
+                            "stages[id=" + sid + "].activities[" + i + "].required",
+                            "REQUIRED_IN_OPTIONAL_STAGE",
+                            "activity.required=true inside required=false stage '"
+                            + sid + "' never gates progress/completion — drop the "
+                            + "flag or make the stage required"));
+                }
+            }
+        }
+    }
+
+    private void validateDiscoveryClueStage(JsonNode acts, Set<ClueType> seenClues,
+                                            String stagePath, List<FieldError> errors) {
+        for (ClueType requiredClue : ClueType.values()) {
+            if (!seenClues.contains(requiredClue)) {
+                errors.add(new FieldError(stagePath + ".activities", "MISSING_CLUE_TYPES",
+                        "discovery stage is missing required clue '" + requiredClue + "'"));
+            }
+        }
+        if (acts.size() != ClueType.values().length) {
+            errors.add(new FieldError(stagePath + ".activities", "INVALID_CLUE_COUNT",
+                    "discovery stage with clues must contain exactly 4 clue activities (one per clue type)"));
+        }
+        for (int j = 0; j < acts.size(); j++) {
+            JsonNode act = acts.get(j);
+            if (act.isObject() && !act.hasNonNull("clueType")) {
+                errors.add(new FieldError(stagePath + ".activities[" + j + "].clueType",
+                        "MISSING_FIELD", "every activity in the 4-clue discovery stage must declare clueType"));
+            }
+            if (act.isObject() && !act.path("required").asBoolean(false)) {
+                errors.add(new FieldError(stagePath + ".activities[" + j + "].required",
+                        "INVALID_CONFIG", "every clue activity in the discovery stage must be required"));
+            }
+        }
+    }
+
+    /**
+     * FOUR_STEP interactive VERIFICATION — publish-level guardrails.
+     * Requires visibleSourceIds[] (learners pick from these) and
+     * requiredEvidenceIds[] ⊆ visibleSourceIds (what the server grades against).
+     * Legacy mode (evidenceSource set) is exempt — that path resolves
+     * evidence from the upstream EVIDENCE_SELECT output, not config lists.
+     */
+    private void validateFourStepVerification(JsonNode act, String path,
+                                               ValidationContext ctx,
+                                               List<FieldError> errors) {
+        JsonNode config = act.get("config");
+        if (config == null || !config.isObject()) {
+            errors.add(new FieldError(path + ".config", "MISSING_FIELD",
+                    "VERIFICATION activity must have a config object"));
+            return;
+        }
+        // Legacy mode — evidenceSource present → skip interactive validation.
+        if (config.hasNonNull("evidenceSource")) return;
+
+        Set<String> visible = stringIds(config.get("visibleSourceIds"));
+        if (visible.isEmpty()) {
+            errors.add(new FieldError(path + ".config.visibleSourceIds",
+                    "MISSING_FIELD",
+                    "interactive VERIFICATION requires visibleSourceIds[] with at least 1 valid evidence id"));
+        }
+        Set<String> required = stringIds(config.get("requiredEvidenceIds"));
+        if (required.isEmpty()) {
+            errors.add(new FieldError(path + ".config.requiredEvidenceIds",
+                    "MISSING_FIELD",
+                    "interactive VERIFICATION requires requiredEvidenceIds[] with at least 1 valid evidence id"));
+        } else if (!visible.isEmpty() && !visible.containsAll(required)) {
+            errors.add(new FieldError(path + ".config.requiredEvidenceIds",
+                    "INVALID_CONFIG",
+                    "requiredEvidenceIds must be a subset of visibleSourceIds"));
+        }
+        // expectedHypothesis must reference a real hypothesis id from the
+        // HYPOTHESIS_CHOICE activity in the same draft.
+        if (config.hasNonNull("expectedHypothesis")) {
+            String expected = config.get("expectedHypothesis").asText();
+            if (!expected.isBlank()) {
+                // hypotheses live in config.hypotheses[] of HYPOTHESIS stage act
+                // We only check format — actual cross-stage lookup is complex;
+                // the handler does it at runtime.
+            }
+        }
+    }
+
+    private static Set<String> stringIds(JsonNode arr) {
+        Set<String> out = new LinkedHashSet<>();
+        if (arr != null && arr.isArray()) {
+            for (JsonNode n : arr) {
+                if (n != null && n.isTextual()) out.add(n.asText());
+            }
+        }
+        return out;
+    }
+
+    private void validateFourStepModel(JsonNode draft, Map<String, JsonNode> stageById,
+                                       ValidationContext ctx, List<FieldError> errors) {
+        JsonNode flowNode = draft.get("flowModel");
+        if (flowNode == null || flowNode.isNull()) return;
+        if (!flowNode.isTextual() || !"FOUR_STEP".equals(flowNode.asText())) {
+            errors.add(new FieldError("flowModel", "INVALID_VALUE",
+                    "flowModel must be 'FOUR_STEP' when specified"));
+            return;
+        }
+        if (!ctx.isPublish()) return;
+        JsonNode stages = draft.get("stages");
+        if (stages == null || !stages.isArray()) return;
+
+        List<StageType> expectedOrder = List.of(
+                StageType.DISCOVERY,
+                StageType.HYPOTHESIS,
+                StageType.VERIFICATION,
+                StageType.RECONSTRUCTION);
+        if (stages.size() != expectedOrder.size()) {
+            errors.add(new FieldError("stages", "INVALID_FOUR_STEP_STRUCTURE",
+                    "FOUR_STEP lesson must contain exactly 4 stages: DISCOVERY, HYPOTHESIS, VERIFICATION, RECONSTRUCTION"));
+            return;
+        }
+        for (int i = 0; i < expectedOrder.size(); i++) {
+            JsonNode s = stages.get(i);
+            if (!s.isObject()) continue;
+            String typeStr = s.path("type").asText("");
+            StageType expected = expectedOrder.get(i);
+            if (!expected.name().equals(typeStr)) {
+                errors.add(new FieldError("stages[" + i + "].type", "INVALID_FOUR_STEP_STRUCTURE",
+                        "step " + (i + 1) + " must be of type " + expected + ", got '" + typeStr + "'"));
+            }
+            JsonNode acts = s.get("activities");
+            if (expected == StageType.DISCOVERY) {
+                Set<ClueType> clues = EnumSet.noneOf(ClueType.class);
+                if (acts != null && acts.isArray()) {
+                    for (JsonNode a : acts) {
+                        if (a.hasNonNull("clueType")) {
+                            try {
+                                clues.add(ClueType.valueOf(a.get("clueType").asText()));
+                            } catch (IllegalArgumentException ignored) {
+                            }
+                        }
+                    }
+                    // Only emit if validateActivities did not already emit for anyClueTagged
+                    if (clues.isEmpty()) {
+                        validateDiscoveryClueStage(acts, clues, "stages[" + i + "]", errors);
+                    }
+                } else {
+                    errors.add(new FieldError("stages[" + i + "].activities", "MISSING_CLUE_TYPES",
+                            "discovery stage must contain the 4 required clues"));
+                }
+            } else {
+                if (acts == null || !acts.isArray() || acts.size() != 1) {
+                    errors.add(new FieldError("stages[" + i + "].activities", "INVALID_FOUR_STEP_STRUCTURE",
+                            "step " + expected + " must have exactly 1 main activity"));
+                    continue;
+                }
+                JsonNode act = acts.get(0);
+                String actType = act != null && act.hasNonNull("type")
+                        ? act.get("type").asText() : "";
+                if (expected == StageType.HYPOTHESIS
+                        && !"HYPOTHESIS_CHOICE".equals(actType)) {
+                    errors.add(new FieldError(
+                            "stages[" + i + "].activities[0].type",
+                            "INVALID_FOUR_STEP_STRUCTURE",
+                            "step HYPOTHESIS must use activity type HYPOTHESIS_CHOICE, got '" + actType + "'"));
+                }
+                if (expected == StageType.VERIFICATION
+                        && "VERIFICATION".equals(actType)) {
+                    validateFourStepVerification(act, "stages[" + i + "].activities[0]", ctx, errors);
+                }
+            }
+        }
+    }
+
+    private static boolean isUuidString(String value) {
+        if (value == null || value.isBlank()) return false;
+        try {
+            UUID.fromString(value);
+            return true;
+        } catch (RuntimeException e) {
+            return false;
+        }
+    }
+
+    /* ---------- helpers ---------- */
+
+    private String validateId(JsonNode idNode, String path, List<FieldError> errors) {
+        if (idNode == null || !idNode.isTextual()) {
+            errors.add(new FieldError(path, "MISSING_FIELD", "id is required"));
+            return null;
+        }
+        String id = idNode.asText();
+        if (!DraftSchema.ID_PATTERN.matcher(id).matches()) {
+            errors.add(new FieldError(path, "INVALID_ID",
+                    "id must match " + DraftSchema.ID_PATTERN.pattern()));
+            return null;
+        }
+        return id;
+    }
+
+    private <E extends Enum<E>> E parseEnum(Class<E> type, JsonNode node,
+                                          String path, String code,
+                                          List<FieldError> errors) {
+        if (node == null || !node.isTextual()) {
+            if (node == null) {
+                errors.add(new FieldError(path, "MISSING_FIELD", "type is required"));
+            } else {
+                errors.add(new FieldError(path, "INVALID_TYPE", "type must be a string"));
+            }
+            return null;
+        }
+        try {
+            return Enum.valueOf(type, node.asText());
+        } catch (IllegalArgumentException e) {
+            errors.add(new FieldError(path, code, "unsupported type '" + node.asText() + "'"));
+            return null;
+        }
+    }
+
+    private ValidationContext buildContext(UUID eventId, ValidationLevel level) {
+        Set<String> valid = Set.of();
+        Set<String> activeAssets = Set.of();
+        Map<String, UUID> versionToScene = Map.of();
+        Set<UUID> publishedSceneIds = Set.of();
+        if (level == ValidationLevel.PUBLISH && eventId != null) {
+            valid = evidences.findIdsByEventIdAndStatusIn(eventId,
+                            List.of(EvidenceStatus.DRAFT, EvidenceStatus.APPROVED))
+                    .stream().map(UUID::toString).collect(Collectors.toSet());
+            activeAssets = assets.findActiveIds().stream()
+                    .map(UUID::toString).collect(Collectors.toSet());
+            // versionId -> owning sceneId so validators can also check the pin
+            // (animationSceneId must equal version.sceneId), not just existence.
+            versionToScene = sceneVersions.findIdAndSceneId().stream()
+                    .collect(Collectors.toMap(
+                            r -> ((UUID) r[0]).toString(), r -> (UUID) r[1]));
+            publishedSceneIds = new java.util.HashSet<>(
+                    sceneVersions.findDistinctSceneIds());
+        }
+        return new ValidationContext(eventId, level, valid, activeAssets,
+                versionToScene, publishedSceneIds);
+    }
+
+    /* ---------- preserved helpers used by existing code ---------- */
+
+    /** Back-compat for LessonService raw-JSON endpoints. */
+    public static String requireJsonObject(String json, String fieldName) {
+        if (json == null) return null;
+        try {
+            JsonNode node = MAPPER.readTree(json);
+            if (node == null || !node.isObject()) {
+                throw new com.dauviet.lesson.domain.DraftSchemaInvalidException(
+                        fieldName + " must be a JSON object");
+            }
+            return MAPPER.writeValueAsString(node);
+        } catch (com.dauviet.lesson.domain.DraftSchemaInvalidException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new com.dauviet.lesson.domain.DraftSchemaInvalidException(
+                    fieldName + " is not valid JSON: " + e.getMessage());
+        }
+    }
+
+    public static String requireJsonArray(String json, String fieldName) {
+        if (json == null) return null;
+        try {
+            JsonNode node = MAPPER.readTree(json);
+            if (node == null || !node.isArray()) {
+                throw new com.dauviet.lesson.domain.DraftSchemaInvalidException(
+                        fieldName + " must be a JSON array");
+            }
+            return MAPPER.writeValueAsString(node);
+        } catch (com.dauviet.lesson.domain.DraftSchemaInvalidException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new com.dauviet.lesson.domain.DraftSchemaInvalidException(
+                    fieldName + " is not valid JSON: " + e.getMessage());
+        }
+    }
+}

@@ -1,0 +1,42 @@
+spring:
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5433/dauviet}
+    username: ${DB_USER:dauviet}
+    password: ${DB_PASSWORD:dauviet_dev}
+
+app:
+  cors:
+    allowed-origins:
+      - http://localhost:3000
+      - http://localhost:5173
+      - http://localhost
+      - capacitor://localhost
+    # Flutter web dev server dùng port random — cho phép mọi localhost:*
+    # Chỉ dùng trong profile local, KHÔNG được đưa lên prod.
+    allowed-origin-patterns:
+      - "http://localhost:*"
+      - "http://127.0.0.1:*"
+  seed:
+    enabled: true
+  security:
+    # Dev-only fallback; production MUST override via JWT_SECRET env.
+    jwt-secret: ${JWT_SECRET:local-dev-secret-change-me-32bytes-minimum-0123456789abcdef}
+
+dauviet:
+  energy:
+    # Local dev: bật Thể lực để test penalty + ENERGY_DEPLETED UI.
+    # Env DAUVIET_ENERGY_ENABLED vẫn override được khi cần.
+    enabled: ${DAUVIET_ENERGY_ENABLED:true}
+
+  auth:
+    google:
+      # OAuth client-id whitelist for /auth/google (idToken aud check AND
+      # accessToken tokeninfo aud check, Issue #41). Paste the Web OAuth
+      # client id (…apps.googleusercontent.com) for Flutter Web + any
+      # Android/iOS client ids, comma-separated. Empty → 503 FEATURE_DISABLED.
+      # Override via GOOGLE_CLIENT_IDS env var.
+      client-ids: ${GOOGLE_CLIENT_IDS:73221283418-jg0kuhf7j5j24mais237ief4qchdpbdd.apps.googleusercontent.com}
+
+logging:
+  level:
+    org.hibernate.orm.deprecation: warn
